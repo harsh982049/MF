@@ -6,6 +6,8 @@ import {
   RiskMetrics,
   LiquidityStressResult,
   DurationShockPoint,
+  SipSimulationResult,
+  AssetClass,
 } from '../types/quant';
 
 /**
@@ -13,7 +15,7 @@ import {
  */
 export function computeTrailingCagr(
   series: NavPoint[],
-  periods: number[] = [1, 3, 5, 7]
+  periods: number[] = [1, 3, 5, 7, 10]
 ): TrailingCagr {
   const result: TrailingCagr = {};
   if (!series || series.length < 10) return result;
@@ -27,7 +29,6 @@ export function computeTrailingCagr(
     targetDate.setFullYear(targetDate.getFullYear() - yrs);
     const targetIso = targetDate.toISOString().split('T')[0];
 
-    // Find the closest point on or before targetIso
     let startPoint: NavPoint | undefined;
     for (let i = sorted.length - 1; i >= 0; i--) {
       if (sorted[i].date <= targetIso) {
@@ -42,8 +43,8 @@ export function computeTrailingCagr(
       if (yrs === 3) result['3Y'] = Number((cagr * 100).toFixed(2));
       if (yrs === 5) result['5Y'] = Number((cagr * 100).toFixed(2));
       if (yrs === 7) result['7Y'] = Number((cagr * 100).toFixed(2));
+      if (yrs === 10) result['10Y'] = Number((cagr * 100).toFixed(2));
     } else {
-      // If history is less than requested years, approximate annualized if >= 1 year
       const firstPoint = sorted[0];
       const days = (endDate.getTime() - new Date(firstPoint.date).getTime()) / 86400000;
       if (days >= 300) {
@@ -52,6 +53,8 @@ export function computeTrailingCagr(
         if (yrs === 1 && !result['1Y']) result['1Y'] = Number((cagr * 100).toFixed(2));
         if (yrs === 3 && actualYrs >= 2) result['3Y'] = Number((cagr * 100).toFixed(2));
         if (yrs === 5 && actualYrs >= 4) result['5Y'] = Number((cagr * 100).toFixed(2));
+        if (yrs === 7 && actualYrs >= 6) result['7Y'] = Number((cagr * 100).toFixed(2));
+        if (yrs === 10 && actualYrs >= 8) result['10Y'] = Number((cagr * 100).toFixed(2));
       }
     }
   }
@@ -60,7 +63,8 @@ export function computeTrailingCagr(
 }
 
 /**
- * Rolling returns distribution (3Y or 5Y windows): (P_t / P_{t - W}) ** (252 / W) - 1
+ * Full Rolling Returns Distribution (1Y, 3Y, 5Y)
+ * Computes Mean, Median, Min, Max, Q25, Q75, Std, % Positive, % Negative
  */
 export function computeRollingReturns(
   series: NavPoint[],
@@ -69,6 +73,7 @@ export function computeRollingReturns(
 ): RollingDistribution {
   const windowDays = Math.floor(windowYears * tradingDaysPerYear);
   const empty: RollingDistribution = {
+    windowYears,
     mean: 0,
     median: 0,
     min: 0,
@@ -77,6 +82,8 @@ export function computeRollingReturns(
     q75: 0,
     std: 0,
     count: 0,
+    pctPositive: 0,
+    pctNegative: 0,
     series: [],
   };
 
@@ -98,20 +105,24 @@ export function computeRollingReturns(
 
   if (rollValues.length === 0) return empty;
 
-  rollValues.sort((a, b) => a - b);
-  const n = rollValues.length;
-  const sum = rollValues.reduce((a, b) => a + b, 0);
+  const sortedValues = [...rollValues].sort((a, b) => a - b);
+  const n = sortedValues.length;
+  const sum = sortedValues.reduce((a, b) => a + b, 0);
   const mean = sum / n;
-  const median = n % 2 === 0 ? (rollValues[n / 2 - 1] + rollValues[n / 2]) / 2 : rollValues[Math.floor(n / 2)];
-  const min = rollValues[0];
-  const max = rollValues[n - 1];
-  const q25 = rollValues[Math.floor(n * 0.25)];
-  const q75 = rollValues[Math.floor(n * 0.75)];
+  const median = n % 2 === 0 ? (sortedValues[n / 2 - 1] + sortedValues[n / 2]) / 2 : sortedValues[Math.floor(n / 2)];
+  const min = sortedValues[0];
+  const max = sortedValues[n - 1];
+  const q25 = sortedValues[Math.floor(n * 0.25)];
+  const q75 = sortedValues[Math.floor(n * 0.75)];
 
-  const variance = rollValues.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / n;
+  const variance = sortedValues.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / n;
   const std = Math.sqrt(variance);
 
+  const positiveCount = sortedValues.filter((v) => v > 0).length;
+  const negativeCount = n - positiveCount;
+
   return {
+    windowYears,
     mean: Number(mean.toFixed(2)),
     median: Number(median.toFixed(2)),
     min: Number(min.toFixed(2)),
@@ -120,6 +131,8 @@ export function computeRollingReturns(
     q75: Number(q75.toFixed(2)),
     std: Number(std.toFixed(2)),
     count: n,
+    pctPositive: Number(((positiveCount / n) * 100).toFixed(1)),
+    pctNegative: Number(((negativeCount / n) * 100).toFixed(1)),
     series: rollSeries,
   };
 }
@@ -148,22 +161,26 @@ export function computeBenchmarkHitRate(
   }
 
   if (matched === 0) return 0;
-  return Number(((beatCount / matched) * 100).toFixed(2));
+  return Number(((beatCount / matched) * 100).toFixed(1));
 }
 
 /**
- * Risk Ratios, CML metrics, and Drawdowns
+ * Comprehensive Risk & Active Alpha Metrics
  */
 export function computeComprehensiveMetrics(
   fundSeries: NavPoint[],
   benchSeries: NavPoint[],
   fundName: string,
   schemeCode: number,
+  category: string,
+  assetClass: AssetClass,
   rfAnnual: number = 0.065
 ): RiskMetrics {
   const empty: RiskMetrics = {
     fundName,
     schemeCode,
+    category,
+    assetClass,
     cagr: 0,
     volatility: 0,
     sharpe: 0,
@@ -175,6 +192,9 @@ export function computeComprehensiveMetrics(
     informationRatio: 0,
     maxDrawdown: 0,
     recoveryDays: 0,
+    calmarRatio: 0,
+    upsideCapture: 100,
+    downsideCapture: 100,
     peakDate: '',
     maxDdDate: '',
     recoveryDate: '',
@@ -182,7 +202,6 @@ export function computeComprehensiveMetrics(
 
   if (!fundSeries.length || !benchSeries.length) return empty;
 
-  // Align dates
   const benchMap = new Map(benchSeries.map((p) => [p.date, p.nav]));
   const aligned: { date: string; fNav: number; bNav: number }[] = [];
 
@@ -195,14 +214,11 @@ export function computeComprehensiveMetrics(
 
   if (aligned.length < 30) return empty;
 
-  // Compute daily returns
   const fReturns: number[] = [];
   const bReturns: number[] = [];
   for (let i = 1; i < aligned.length; i++) {
-    const fr = (aligned[i].fNav - aligned[i - 1].fNav) / aligned[i - 1].fNav;
-    const br = (aligned[i].bNav - aligned[i - 1].bNav) / aligned[i - 1].bNav;
-    fReturns.push(fr);
-    bReturns.push(br);
+    fReturns.push((aligned[i].fNav - aligned[i - 1].fNav) / aligned[i - 1].fNav);
+    bReturns.push((aligned[i].bNav - aligned[i - 1].bNav) / aligned[i - 1].bNav);
   }
 
   const n = fReturns.length;
@@ -212,19 +228,15 @@ export function computeComprehensiveMetrics(
   const fAnnReturn = Math.pow(fCum, 252 / n) - 1.0;
   const bAnnReturn = Math.pow(bCum, 252 / n) - 1.0;
 
-  // Volatility
   const fMean = fReturns.reduce((a, b) => a + b, 0) / n;
   const bMean = bReturns.reduce((a, b) => a + b, 0) / n;
 
   const fVariance = fReturns.reduce((acc, r) => acc + Math.pow(r - fMean, 2), 0) / (n - 1);
   const bVariance = bReturns.reduce((acc, r) => acc + Math.pow(r - bMean, 2), 0) / (n - 1);
-
   const fAnnVol = Math.sqrt(fVariance) * Math.sqrt(252);
 
-  // Sharpe
   const sharpe = fAnnVol > 1e-6 ? (fAnnReturn - rfAnnual) / fAnnVol : 0;
 
-  // Sortino (Downside semi-deviation relative to daily Rf)
   const rfDaily = Math.pow(1 + rfAnnual, 1 / 252) - 1;
   const downsideVariance =
     fReturns.reduce((acc, r) => {
@@ -234,7 +246,6 @@ export function computeComprehensiveMetrics(
   const downsideDev = Math.sqrt(downsideVariance) * Math.sqrt(252);
   const sortino = downsideDev > 1e-6 ? (fAnnReturn - rfAnnual) / downsideDev : 0;
 
-  // Covariance, Beta & R2
   let cov = 0;
   for (let i = 0; i < n; i++) {
     cov += (fReturns[i] - fMean) * (bReturns[i] - bMean);
@@ -248,7 +259,6 @@ export function computeComprehensiveMetrics(
   const corr = Math.sqrt(fVariance * bVariance) > 1e-8 ? cov / Math.sqrt(fVariance * bVariance) : 0;
   const rSquared = Math.min(1.0, Math.pow(corr, 2));
 
-  // Tracking Error & Information Ratio
   const excessReturns = fReturns.map((r, i) => r - bReturns[i]);
   const excessMean = excessReturns.reduce((a, b) => a + b, 0) / n;
   const excessVar = excessReturns.reduce((acc, er) => acc + Math.pow(er - excessMean, 2), 0) / (n - 1);
@@ -261,21 +271,18 @@ export function computeComprehensiveMetrics(
   let maxDdIdx = 0;
   let peakIdx = 0;
 
-  const drawdowns: number[] = [];
   for (let i = 0; i < aligned.length; i++) {
     const nav = aligned[i].fNav;
     if (nav > runningMax) {
       runningMax = nav;
     }
     const dd = (nav - runningMax) / runningMax;
-    drawdowns.push(dd);
     if (dd < maxDd) {
       maxDd = dd;
       maxDdIdx = i;
     }
   }
 
-  // Find peak before maxDd
   let prePeakVal = -Infinity;
   for (let i = 0; i <= maxDdIdx; i++) {
     if (aligned[i].fNav >= prePeakVal) {
@@ -284,7 +291,6 @@ export function computeComprehensiveMetrics(
     }
   }
 
-  // Find recovery after maxDd
   let recoveryIdx = -1;
   for (let i = maxDdIdx; i < aligned.length; i++) {
     if (aligned[i].fNav >= prePeakVal) {
@@ -303,9 +309,28 @@ export function computeComprehensiveMetrics(
     recoveryDays = Math.round((new Date(recoveryDate).getTime() - new Date(peakDate).getTime()) / 86400000);
   }
 
+  const calmarRatio = Math.abs(maxDd) > 1e-4 ? fAnnReturn / Math.abs(maxDd) : 0;
+
+  // Upside / Downside Capture Ratio
+  let upFundSum = 0, upBenchSum = 0;
+  let downFundSum = 0, downBenchSum = 0;
+  for (let i = 0; i < n; i++) {
+    if (bReturns[i] > 0) {
+      upFundSum += fReturns[i];
+      upBenchSum += bReturns[i];
+    } else if (bReturns[i] < 0) {
+      downFundSum += fReturns[i];
+      downBenchSum += bReturns[i];
+    }
+  }
+  const upsideCapture = upBenchSum !== 0 ? (upFundSum / upBenchSum) * 100 : 100;
+  const downsideCapture = downBenchSum !== 0 ? (downFundSum / downBenchSum) * 100 : 100;
+
   return {
     fundName,
     schemeCode,
+    category,
+    assetClass,
     cagr: Number((fAnnReturn * 100).toFixed(2)),
     volatility: Number((fAnnVol * 100).toFixed(2)),
     sharpe: Number(sharpe.toFixed(2)),
@@ -317,6 +342,9 @@ export function computeComprehensiveMetrics(
     informationRatio: Number(informationRatio.toFixed(2)),
     maxDrawdown: Number((maxDd * 100).toFixed(2)),
     recoveryDays,
+    calmarRatio: Number(calmarRatio.toFixed(2)),
+    upsideCapture: Number(upsideCapture.toFixed(1)),
+    downsideCapture: Number(downsideCapture.toFixed(1)),
     peakDate,
     maxDdDate,
     recoveryDate,
@@ -324,8 +352,193 @@ export function computeComprehensiveMetrics(
 }
 
 /**
- * Pairwise ISIN Overlap: Sum_{shared ISINs} min(Weight_A, Weight_B)
+ * Monthly Systematic Investment Plan (SIP) Wealth Simulator with XIRR
  */
+export function simulateMonthlySip(
+  series: NavPoint[],
+  monthlyAmount: number = 10000,
+  years: number = 5
+): SipSimulationResult {
+  if (!series || series.length < 30) {
+    return {
+      monthlyAmount,
+      totalInvested: 0,
+      totalCorpus: 0,
+      absoluteProfit: 0,
+      xirrPct: 0,
+      timeline: [],
+    };
+  }
+
+  const sorted = [...series].sort((a, b) => a.date.localeCompare(b.date));
+  const endDate = new Date(sorted[sorted.length - 1].date);
+  const startDate = new Date(endDate);
+  startDate.setFullYear(startDate.getFullYear() - years);
+  const startIso = startDate.toISOString().split('T')[0];
+
+  const subSeries = sorted.filter((p) => p.date >= startIso);
+  if (subSeries.length < 10) {
+    return {
+      monthlyAmount,
+      totalInvested: 0,
+      totalCorpus: 0,
+      absoluteProfit: 0,
+      xirrPct: 0,
+      timeline: [],
+    };
+  }
+
+  let totalUnits = 0;
+  let totalInvested = 0;
+  const timeline: { date: string; invested: number; corpus: number }[] = [];
+  const cashFlows: { amount: number; date: Date }[] = [];
+
+  let lastMonth = '';
+  for (const point of subSeries) {
+    const ym = point.date.slice(0, 7); // YYYY-MM
+    if (ym !== lastMonth) {
+      lastMonth = ym;
+      const unitsBought = monthlyAmount / point.nav;
+      totalUnits += unitsBought;
+      totalInvested += monthlyAmount;
+
+      cashFlows.push({
+        amount: -monthlyAmount,
+        date: new Date(point.date),
+      });
+
+      timeline.push({
+        date: point.date,
+        invested: totalInvested,
+        corpus: Math.round(totalUnits * point.nav),
+      });
+    }
+  }
+
+  const finalNav = subSeries[subSeries.length - 1].nav;
+  const totalCorpus = Math.round(totalUnits * finalNav);
+  const absoluteProfit = totalCorpus - totalInvested;
+
+  cashFlows.push({
+    amount: totalCorpus,
+    date: new Date(subSeries[subSeries.length - 1].date),
+  });
+
+  // Calculate XIRR via Newton-Raphson approximation
+  let xirr = 0.12;
+  const firstDate = cashFlows[0]?.date.getTime() || 0;
+  for (let iter = 0; iter < 25; iter++) {
+    let npv = 0;
+    let dNpv = 0;
+    for (const cf of cashFlows) {
+      const dt = (cf.date.getTime() - firstDate) / (365.25 * 86400000);
+      const factor = Math.pow(1 + xirr, dt);
+      if (factor > 0) {
+        npv += cf.amount / factor;
+        dNpv -= (dt * cf.amount) / (factor * (1 + xirr));
+      }
+    }
+    if (Math.abs(npv) < 1.0 || Math.abs(dNpv) < 1e-6) break;
+    xirr = xirr - npv / dNpv;
+    if (xirr < -0.99) xirr = -0.9;
+  }
+
+  return {
+    monthlyAmount,
+    totalInvested,
+    totalCorpus,
+    absoluteProfit,
+    xirrPct: Number((xirr * 100).toFixed(2)),
+    timeline,
+  };
+}
+
+/**
+ * Pairwise Daily Return Correlation Matrix & Diversification Score
+ */
+export function computeReturnCorrelationMatrix(
+  seriesMap: Record<number, NavPoint[]>,
+  fundNames: Record<number, string>
+): { codes: number[]; names: string[]; matrix: number[][]; diversificationScore: number } {
+  const codes = Object.keys(seriesMap).map((k) => parseInt(k, 10));
+  if (codes.length < 2) {
+    return { codes, names: codes.map((c) => fundNames[c] || `Scheme ${c}`), matrix: [[1.0]], diversificationScore: 0 };
+  }
+
+  // Find common date intersection
+  const dateSets = codes.map((c) => new Set(seriesMap[c].map((p) => p.date)));
+  const commonDates: string[] = [];
+  const firstSet = dateSets[0];
+  firstSet.forEach((d) => {
+    if (dateSets.every((s) => s.has(d))) {
+      commonDates.push(d);
+    }
+  });
+
+  commonDates.sort();
+  if (commonDates.length < 20) {
+    const names = codes.map((c) => fundNames[c] || `Scheme ${c}`);
+    const eye = codes.map((_, i) => codes.map((_, j) => (i === j ? 1.0 : 0.8)));
+    return { codes, names, matrix: eye, diversificationScore: 20 };
+  }
+
+  // Calculate daily returns for each code
+  const returnsByCode: Record<number, number[]> = {};
+  codes.forEach((c) => {
+    const map = new Map(seriesMap[c].map((p) => [p.date, p.nav]));
+    const rets: number[] = [];
+    for (let i = 1; i < commonDates.length; i++) {
+      const p1 = map.get(commonDates[i - 1])!;
+      const p2 = map.get(commonDates[i])!;
+      rets.push((p2 - p1) / p1);
+    }
+    returnsByCode[c] = rets;
+  });
+
+  const n = codes.length;
+  const matrix: number[][] = Array.from({ length: n }, () => Array(n).fill(1.0));
+  let offDiagSum = 0;
+  let offDiagCount = 0;
+
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      if (i === j) {
+        matrix[i][j] = 1.0;
+      } else if (i < j) {
+        const r1 = returnsByCode[codes[i]];
+        const r2 = returnsByCode[codes[j]];
+        const m1 = r1.reduce((a, b) => a + b, 0) / r1.length;
+        const m2 = r2.reduce((a, b) => a + b, 0) / r2.length;
+        let cov = 0, v1 = 0, v2 = 0;
+        for (let k = 0; k < r1.length; k++) {
+          const d1 = r1[k] - m1;
+          const d2 = r2[k] - m2;
+          cov += d1 * d2;
+          v1 += d1 * d1;
+          v2 += d2 * d2;
+        }
+        const denom = Math.sqrt(v1 * v2);
+        const corr = denom > 1e-8 ? cov / denom : 0;
+        matrix[i][j] = Number(corr.toFixed(2));
+        matrix[j][i] = Number(corr.toFixed(2));
+        offDiagSum += corr;
+        offDiagCount++;
+      }
+    }
+  }
+
+  const avgCorr = offDiagCount > 0 ? offDiagSum / offDiagCount : 1.0;
+  // Lower correlation = Higher Diversification Score (0 to 100)
+  const diversificationScore = Math.max(0, Math.min(100, Math.round((1.0 - avgCorr) * 100)));
+
+  return {
+    codes,
+    names: codes.map((c) => fundNames[c] || `Scheme ${c}`),
+    matrix,
+    diversificationScore,
+  };
+}
+
 export function computePairwiseOverlap(
   holdingsA: FundHolding[],
   holdingsB: FundHolding[],
@@ -351,9 +564,6 @@ export function computePairwiseOverlap(
   return Number(overlap.toFixed(2));
 }
 
-/**
- * Overlap Matrix across array of funds
- */
 export function computeOverlapMatrix(
   funds: { scheme_code: number; name: string; holdings: FundHolding[] }[]
 ): { names: string[]; matrix: number[][] } {
@@ -376,9 +586,6 @@ export function computeOverlapMatrix(
   return { names, matrix };
 }
 
-/**
- * Look-through Market Cap Exposure: Weighted average across selected funds
- */
 export function aggregateMarketCapExposure(
   funds: { holdings: FundHolding[] }[],
   weights?: number[]
@@ -402,13 +609,10 @@ export function aggregateMarketCapExposure(
   const sum = Object.values(totals).reduce((a, b) => a + b, 0) || 1;
   return Object.entries(totals).map(([segment, val]) => ({
     segment,
-    weight: Number(((val / sum) * 100).toFixed(2)),
+    weight: Number(((val / sum) * 100).toFixed(1)),
   }));
 }
 
-/**
- * Look-through Sector Exposures
- */
 export function aggregateSectorExposure(
   funds: { holdings: FundHolding[] }[],
   weights?: number[]
@@ -427,15 +631,11 @@ export function aggregateSectorExposure(
   return Object.entries(totals)
     .map(([sector, val]) => ({
       sector,
-      weight: Number(((val / sum) * 100).toFixed(2)),
+      weight: Number(((val / sum) * 100).toFixed(1)),
     }))
     .sort((a, b) => b.weight - a.weight);
 }
 
-/**
- * Liquidity Stress Testing
- * Days to liquidate 25% and 50% under 10% daily volume participation limit
- */
 export function calculateLiquidityStress(
   holdings: FundHolding[],
   aumCrores: number = 25000,
@@ -468,13 +668,11 @@ export function calculateLiquidityStress(
     };
   });
 
-  // Pro-rata: dictated by the maximum days scaled by percentage
   const nonCash = analyzed.filter((h) => h.isin !== 'CASH_EQUIV');
   const maxDays = Math.max(...nonCash.map((h) => h.daysToLiquidate), 1.0);
   const days25Prorata = Number((maxDays * 0.25).toFixed(1));
   const days50Prorata = Number((maxDays * 0.50).toFixed(1));
 
-  // Waterfall: sort ascending days, accumulate to 25% and 50%
   const sorted = [...analyzed].sort((a, b) => a.daysToLiquidate - b.daysToLiquidate);
   let cumW = 0;
   let days25Waterfall = 0.5;
@@ -491,7 +689,6 @@ export function calculateLiquidityStress(
     }
   }
 
-  // Brackets
   const under3 = analyzed.filter((h) => h.daysToLiquidate <= 3).reduce((a, b) => a + b.weight, 0);
   const threeToSeven = analyzed.filter((h) => h.daysToLiquidate > 3 && h.daysToLiquidate <= 7).reduce((a, b) => a + b.weight, 0);
   const over10 = analyzed.filter((h) => h.daysToLiquidate > 10).reduce((a, b) => a + b.weight, 0);
@@ -508,10 +705,6 @@ export function calculateLiquidityStress(
   };
 }
 
-/**
- * Debt Duration Sensitivity
- * Delta_NAV% = -D_mod * Delta_y + 0.5 * Convexity * (Delta_y)^2
- */
 export function calculateDurationSensitivity(
   macaulayDuration: number = 3.85,
   currentYtm: number = 0.0745,

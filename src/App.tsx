@@ -10,19 +10,22 @@ import {
   Layers,
   Activity,
   Code2,
-  Sliders,
-  RefreshCw,
   Search,
-  CheckCircle2,
-  AlertTriangle,
-  ArrowUpRight,
-  ArrowDownRight,
-  Percent,
-  Clock,
+  Download,
+  Filter,
+  X,
+  Plus,
+  RefreshCw,
+  Coins,
+  FileText,
   Briefcase,
+  AlertCircle,
+  ExternalLink,
+  ChevronRight,
+  Sparkles,
 } from 'lucide-react';
 
-import { FundMeta, NavPoint, RiskMetrics } from './types/quant';
+import { FundMeta, NavPoint, RiskMetrics, AssetClass } from './types/quant';
 import {
   PRESET_FUNDS,
   BENCHMARKS,
@@ -39,56 +42,86 @@ import {
   aggregateSectorExposure,
   calculateLiquidityStress,
   calculateDurationSensitivity,
-  computePairwiseOverlap,
+  simulateMonthlySip,
+  computeReturnCorrelationMatrix,
 } from './utils/quantEngine';
 import {
   PerformanceChart,
   RollingBoxPlot,
   BubbleScatterPlot,
   OverlapHeatmap,
+  CaptureRatioQuadrant,
+  CorrelationHeatmap,
+  SipGrowthChart,
 } from './components/QuantVisuals';
+import { FundSearchModal } from './components/FundSearchModal';
+import { FundFactsheetModal } from './components/FundFactsheetModal';
+import { DataExportModal } from './components/DataExportModal';
 import { PythonExporter } from './components/PythonExporter';
 
 const COLOR_PALETTE = [
-  '#38bdf8', // Sky Blue
+  '#38bdf8', // Sky
   '#34d399', // Emerald
-  '#f472b6', // Pink
+  '#f472b6', // Rose
   '#a78bfa', // Purple
   '#fb923c', // Orange
   '#e879f9', // Fuchsia
+  '#2dd4bf', // Teal
 ];
 
 export default function App() {
-  // Navigation
-  const [activeTab, setActiveTab] = useState<'perf' | 'risk' | 'overlap' | 'stress' | 'python'>('perf');
+  // Navigation Tabs
+  const [activeTab, setActiveTab] = useState<'perf' | 'risk' | 'overlap' | 'stress' | 'sip' | 'factsheet' | 'python'>('perf');
 
-  // Sidebar Controls
+  // Active Fund Universe
   const [selectedCodes, setSelectedCodes] = useState<number[]>([122639, 127042, 118989, 118778]);
+  const [customFunds, setCustomFunds] = useState<Record<number, FundMeta>>({});
   const [benchmarkSymbol, setBenchmarkSymbol] = useState<string>('^CRSLDX');
   const [timeHorizon, setTimeHorizon] = useState<number>(5);
   const [rfRate, setRfRate] = useState<number>(6.5);
   const [adtvParticipation, setAdtvParticipation] = useState<number>(10);
-  const [customCodeInput, setCustomCodeInput] = useState<string>('');
-  const [customFunds, setCustomFunds] = useState<Record<number, FundMeta>>({});
-  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-
-  // Time-Series Nav Storage
-  const [fundSeriesMap, setFundSeriesMap] = useState<Record<number, NavPoint[]>>({});
   const [rollingWindowYears, setRollingWindowYears] = useState<number>(3);
 
-  // Stress test fund selection
-  const [stressFundCode, setStressFundCode] = useState<number>(122639);
+  // Modals
+  const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [factsheetFund, setFactsheetFund] = useState<FundMeta | null>(null);
+
+  // SIP Simulator State
+  const [sipMonthlyAmount, setSipMonthlyAmount] = useState<number>(10000);
+  const [sipTargetCode, setSipTargetCode] = useState<number>(122639);
+
+  // Debt & Stress State
+  const [stressFundCode, setStressFundCode] = useState<number>(120503);
   const [customRateShockBps, setCustomRateShockBps] = useState<number>(50);
 
-  // Overlap drill-down selection
-  const [overlapPair, setOverlapPair] = useState<[number, number]>([122639, 127042]);
+  // Time-Series Storage & Loading
+  const [fundSeriesMap, setFundSeriesMap] = useState<Record<number, NavPoint[]>>({});
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
-  // Combined universe of preset + custom added funds
+  // All combined available funds
   const allFunds = useMemo(() => {
     return { ...PRESET_FUNDS, ...customFunds };
   }, [customFunds]);
 
-  // Fetch or calibrate series on fund selection or horizon change
+  // Active selected fund objects
+  const activeFundsList: FundMeta[] = useMemo(() => {
+    return selectedCodes.map((code) => allFunds[code] || PRESET_FUNDS[122639]);
+  }, [selectedCodes, allFunds]);
+
+  // Keyboard shortcut Cmd+K / Ctrl+K
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setIsSearchModalOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Fetch or regenerate time-series for all selected funds
   useEffect(() => {
     let isMounted = true;
     setIsRefreshing(true);
@@ -114,59 +147,14 @@ export default function App() {
 
   // Benchmark Series
   const benchmarkSeries = useMemo(() => {
-    return generateBenchmarkSeries(benchmarkSymbol, timeHorizon);
-  }, [benchmarkSymbol, timeHorizon]);
+    return generateBenchmarkSeries(benchmarkSymbol, 12);
+  }, [benchmarkSymbol]);
 
   const activeBenchmark = useMemo(() => {
     return BENCHMARKS.find((b) => b.symbol === benchmarkSymbol) || BENCHMARKS[0];
   }, [benchmarkSymbol]);
 
-  // Handle adding custom scheme code
-  const handleAddCustomScheme = async () => {
-    const code = parseInt(customCodeInput.trim(), 10);
-    if (!code || isNaN(code)) return;
-
-    if (!allFunds[code]) {
-      setIsRefreshing(true);
-      try {
-        const resp = await fetch(`https://api.mfapi.in/mf/${code}`);
-        if (resp.ok) {
-          const json = await resp.json();
-          const meta = json.meta;
-          const newFund: FundMeta = {
-            scheme_code: code,
-            name: meta.scheme_name || `Scheme ${code}`,
-            category: meta.scheme_category || 'Equity Fund',
-            benchmark_symbol: benchmarkSymbol,
-            isin: meta.isin_growth || `INF${code}`,
-            aum_cr: 15000,
-            macaulay_duration: 0,
-            holdings: PRESET_FUNDS[118989].holdings, // inherit representative large-cap basket
-          };
-          setCustomFunds((prev) => ({ ...prev, [code]: newFund }));
-        }
-      } catch {
-        // Fallback placeholder fund
-        const fallbackFund: FundMeta = {
-          scheme_code: code,
-          name: `Custom Scheme ${code}`,
-          category: 'Flexi Cap',
-          benchmark_symbol: benchmarkSymbol,
-          isin: `INF${code}`,
-          aum_cr: 10000,
-          macaulay_duration: 0,
-          holdings: PRESET_FUNDS[122639].holdings,
-        };
-        setCustomFunds((prev) => ({ ...prev, [code]: fallbackFund }));
-      }
-    }
-
-    if (!selectedCodes.includes(code)) {
-      setSelectedCodes((prev) => [...prev, code]);
-    }
-    setCustomCodeInput('');
-  };
-
+  // Add / Remove Fund Handler
   const handleToggleFund = (code: number) => {
     if (selectedCodes.includes(code)) {
       if (selectedCodes.length > 1) {
@@ -177,36 +165,109 @@ export default function App() {
     }
   };
 
-  // Trailing CAGR Matrix
-  const trailingCagrMatrix = useMemo(() => {
-    return selectedCodes.map((code) => {
-      const fund = allFunds[code];
-      const series = fundSeriesMap[code] || [];
-      const cagr = computeTrailingCagr(series, [1, 3, 5, 7]);
-      return {
-        code,
-        name: fund?.name || `Scheme ${code}`,
-        cagr,
-      };
+  const handleAddCustomScheme = async (code: number) => {
+    if (!allFunds[code]) {
+      try {
+        const resp = await fetch(`https://api.mfapi.in/mf/${code}`);
+        if (resp.ok) {
+          const json = await resp.json();
+          const meta = json.meta;
+          const newFund: FundMeta = {
+            scheme_code: code,
+            name: meta.scheme_name || `Scheme ${code}`,
+            category: meta.scheme_category || 'Equity Fund',
+            asset_class: meta.scheme_category?.toLowerCase().includes('debt') ? 'Debt' : 'Equity',
+            fund_house: meta.fund_house || 'Indian Mutual Fund',
+            benchmark_symbol: benchmarkSymbol,
+            isin: meta.isin_growth || `INF${code}`,
+            aum_cr: 12500,
+            inception_date: '2015-01-01',
+            expense_ratio_direct: 0.65,
+            expense_ratio_regular: 1.45,
+            turnover_ratio_pct: 25.0,
+            riskometer: 'Very High',
+            exit_load: '1% if redeemed within 1 year; Nil thereafter.',
+            min_sip_inr: 500,
+            min_lumpsum_inr: 1000,
+            investment_objective: 'To provide long-term capital growth through investments in a diversified portfolio.',
+            manager: {
+              name: 'Appointed Portfolio Manager',
+              tenureYears: 4.0,
+              overallExpYears: 16,
+              education: 'Post Graduate (Finance), CA / CFA',
+              bio: 'Experienced fund manager tracking quantitative capital allocation and portfolio construction.',
+              otherFundsManaged: [],
+            },
+            holdings: PRESET_FUNDS[118989].holdings,
+          };
+          setCustomFunds((prev) => ({ ...prev, [code]: newFund }));
+        }
+      } catch {
+        // Fallback
+        const fallbackFund: FundMeta = {
+          scheme_code: code,
+          name: `Custom Scheme ${code}`,
+          category: 'Flexi Cap',
+          asset_class: 'Equity',
+          fund_house: 'Mutual Fund AMC',
+          benchmark_symbol: benchmarkSymbol,
+          isin: `INF${code}`,
+          aum_cr: 10000,
+          inception_date: '2016-01-01',
+          expense_ratio_direct: 0.7,
+          expense_ratio_regular: 1.5,
+          turnover_ratio_pct: 30.0,
+          riskometer: 'Very High',
+          exit_load: '1% within 365 days',
+          min_sip_inr: 500,
+          min_lumpsum_inr: 1000,
+          investment_objective: 'Long-term capital growth.',
+          manager: {
+            name: 'Portfolio Manager',
+            tenureYears: 3.0,
+            overallExpYears: 15,
+            education: 'MBA (Finance)',
+            bio: 'Active investment strategist.',
+            otherFundsManaged: [],
+          },
+          holdings: PRESET_FUNDS[122639].holdings,
+        };
+        setCustomFunds((prev) => ({ ...prev, [code]: fallbackFund }));
+      }
+    }
+
+    if (!selectedCodes.includes(code)) {
+      setSelectedCodes((prev) => [...prev, code]);
+    }
+  };
+
+  // Trailing CAGRs
+  const trailingCagrMap = useMemo(() => {
+    const map: Record<number, Record<string, number | undefined>> = {};
+    selectedCodes.forEach((code) => {
+      const s = fundSeriesMap[code] || [];
+      map[code] = computeTrailingCagr(s, [1, 3, 5, 7, 10]);
     });
-  }, [selectedCodes, allFunds, fundSeriesMap]);
+    return map;
+  }, [selectedCodes, fundSeriesMap]);
 
   const benchmarkCagr = useMemo(() => {
-    return computeTrailingCagr(benchmarkSeries, [1, 3, 5, 7]);
+    return computeTrailingCagr(benchmarkSeries, [1, 3, 5, 7, 10]);
   }, [benchmarkSeries]);
 
   // Rolling Return Distributions & Hit Rates
   const rollingAnalysis = useMemo(() => {
-    const benchRolling = computeRollingReturns(benchmarkSeries, rollingWindowYears);
+    const benchDist = computeRollingReturns(benchmarkSeries, rollingWindowYears);
 
     const fundsRolling = selectedCodes.map((code, idx) => {
       const fund = allFunds[code];
       const series = fundSeriesMap[code] || [];
       const dist = computeRollingReturns(series, rollingWindowYears);
-      const hitRate = computeBenchmarkHitRate(dist.series, benchRolling.series);
+      const hitRate = computeBenchmarkHitRate(dist.series, benchDist.series);
       return {
         code,
         name: fund?.name || `Scheme ${code}`,
+        category: fund?.category || 'Equity',
         dist,
         hitRate,
         color: COLOR_PALETTE[idx % COLOR_PALETTE.length],
@@ -214,12 +275,12 @@ export default function App() {
     });
 
     return {
-      benchDist: benchRolling,
+      benchDist,
       fundsRolling,
     };
   }, [selectedCodes, allFunds, fundSeriesMap, benchmarkSeries, rollingWindowYears]);
 
-  // Comprehensive Risk Metrics (Alpha, Beta, Sharpe, Sortino, IR, Drawdowns)
+  // Risk & Capital Market Line Metrics
   const riskMetricsList: RiskMetrics[] = useMemo(() => {
     return selectedCodes.map((code) => {
       const fund = allFunds[code];
@@ -229,12 +290,14 @@ export default function App() {
         benchmarkSeries,
         fund?.name || `Scheme ${code}`,
         code,
+        fund?.category || 'Equity',
+        fund?.asset_class || 'Equity',
         rfRate / 100.0
       );
     });
   }, [selectedCodes, allFunds, fundSeriesMap, benchmarkSeries, rfRate]);
 
-  // Overlap Matrix & Exposures
+  // Overlap & Return Correlation Data
   const overlapData = useMemo(() => {
     const fundsList = selectedCodes.map((code) => ({
       scheme_code: code,
@@ -246,54 +309,34 @@ export default function App() {
     const mcapExposure = aggregateMarketCapExposure(fundsList);
     const sectorExposure = aggregateSectorExposure(fundsList);
 
+    const nameMap: Record<number, string> = {};
+    selectedCodes.forEach((c) => {
+      nameMap[c] = allFunds[c]?.name || `Scheme ${c}`;
+    });
+
+    const corrRes = computeReturnCorrelationMatrix(fundSeriesMap, nameMap);
+
     return {
       names: matrixRes.names,
       matrix: matrixRes.matrix,
       mcapExposure,
       sectorExposure,
+      corrNames: corrRes.names,
+      corrMatrix: corrRes.matrix,
+      diversificationScore: corrRes.diversificationScore,
     };
-  }, [selectedCodes, allFunds]);
+  }, [selectedCodes, allFunds, fundSeriesMap]);
 
-  // Shared holdings for selected pair
-  const sharedHoldings = useMemo(() => {
-    const [c1, c2] = overlapPair;
-    const h1 = allFunds[c1]?.holdings || [];
-    const h2 = allFunds[c2]?.holdings || [];
-
-    const map2 = new Map(h2.map((h) => [h.isin, h]));
-    const common: {
-      isin: string;
-      name: string;
-      sector: string;
-      mcap: string;
-      w1: number;
-      w2: number;
-      overlapContrib: number;
-    }[] = [];
-
-    h1.forEach((stock) => {
-      if (stock.isin === 'CASH_EQUIV') return;
-      const match = map2.get(stock.isin);
-      if (match) {
-        common.push({
-          isin: stock.isin,
-          name: stock.name,
-          sector: stock.sector,
-          mcap: stock.mcap,
-          w1: stock.weight,
-          w2: match.weight,
-          overlapContrib: Math.min(stock.weight, match.weight),
-        });
-      }
-    });
-
-    return common.sort((a, b) => b.overlapContrib - a.overlapContrib);
-  }, [overlapPair, allFunds]);
+  // SIP Simulation Result
+  const sipResult = useMemo(() => {
+    const series = fundSeriesMap[sipTargetCode] || benchmarkSeries;
+    return simulateMonthlySip(series, sipMonthlyAmount, timeHorizon);
+  }, [fundSeriesMap, sipTargetCode, benchmarkSeries, sipMonthlyAmount, timeHorizon]);
 
   // Stress Testing Target Fund
   const targetStressFund = useMemo(() => {
-    return allFunds[stressFundCode] || allFunds[selectedCodes[0]] || PRESET_FUNDS[122639];
-  }, [stressFundCode, allFunds, selectedCodes]);
+    return allFunds[stressFundCode] || activeFundsList[0] || PRESET_FUNDS[120503];
+  }, [stressFundCode, allFunds, activeFundsList]);
 
   const liquidityResult = useMemo(() => {
     return calculateLiquidityStress(
@@ -311,7 +354,6 @@ export default function App() {
     );
   }, [targetStressFund]);
 
-  // Interactive custom rate shock calculation
   const customShockResult = useMemo(() => {
     const macDur = targetStressFund.macaulay_duration || 3.85;
     const ytm = targetStressFund.ytm || 0.0745;
@@ -329,7 +371,7 @@ export default function App() {
     };
   }, [targetStressFund, customRateShockBps]);
 
-  // Named performance map for line chart
+  // Named series for line chart
   const namedPerfMap = useMemo(() => {
     const res: Record<string, NavPoint[]> = {};
     selectedCodes.forEach((code) => {
@@ -341,303 +383,254 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col font-sans selection:bg-indigo-900 selection:text-white">
-      {/* Top Bar Contract (3 Zones: Brand Title, Nav Links, Primary CTA) */}
-      <header className="flex items-center justify-between gap-8 px-6 py-3.5 border-b border-slate-800 bg-[#0f172a]/90 backdrop-blur sticky top-0 z-50">
-        {/* Zone 1: Brand Title */}
-        <div className="flex items-center gap-3 shrink-0">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-600 to-emerald-400 flex items-center justify-center text-white font-bold text-sm shadow-md">
-            ₹
-          </div>
-          <span className="text-base font-bold tracking-tight text-white whitespace-nowrap">
-            Indian MF Quant Studio
-          </span>
-          <span className="text-xs text-slate-500 font-normal hidden sm:inline">
-            · Institutional Analytics Engine
-          </span>
-        </div>
-
-        {/* Zone 2: Navigation Links */}
-        <nav className="hidden md:flex items-center gap-6 text-xs font-medium text-slate-300">
-          <button
-            onClick={() => setActiveTab('perf')}
-            className={`transition-colors whitespace-nowrap ${
-              activeTab === 'perf' ? 'text-emerald-400 font-semibold underline underline-offset-4' : 'hover:text-white'
-            }`}
-          >
-            Performance &amp; Rolling
-          </button>
-          <button
-            onClick={() => setActiveTab('risk')}
-            className={`transition-colors whitespace-nowrap ${
-              activeTab === 'risk' ? 'text-emerald-400 font-semibold underline underline-offset-4' : 'hover:text-white'
-            }`}
-          >
-            Risk &amp; Alpha
-          </button>
-          <button
-            onClick={() => setActiveTab('overlap')}
-            className={`transition-colors whitespace-nowrap ${
-              activeTab === 'overlap' ? 'text-emerald-400 font-semibold underline underline-offset-4' : 'hover:text-white'
-            }`}
-          >
-            Portfolio Overlap
-          </button>
-          <button
-            onClick={() => setActiveTab('stress')}
-            className={`transition-colors whitespace-nowrap ${
-              activeTab === 'stress' ? 'text-emerald-400 font-semibold underline underline-offset-4' : 'hover:text-white'
-            }`}
-          >
-            Debt &amp; Stress
-          </button>
-          <button
-            onClick={() => setActiveTab('python')}
-            className={`transition-colors whitespace-nowrap ${
-              activeTab === 'python' ? 'text-indigo-400 font-semibold underline underline-offset-4' : 'hover:text-white'
-            }`}
-          >
-            Python Suite
-          </button>
-        </nav>
-
-        {/* Zone 3: Primary Action */}
-        <div className="flex items-center gap-3 shrink-0">
-          <button
-            onClick={() => setActiveTab('python')}
-            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors whitespace-nowrap shadow-sm cursor-pointer"
-          >
-            <Code2 className="w-3.5 h-3.5" />
-            <span>Export Python Suite</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Main Layout: Sidebar Controls + Central Workspace Canvas */}
-      <div className="flex-1 flex flex-col lg:flex-row max-w-[1720px] w-full mx-auto">
-        {/* Sidebar Controls */}
-        <aside className="w-full lg:w-72 p-5 bg-[#0f172a]/60 border-r border-slate-800/80 shrink-0 space-y-6">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                <Briefcase className="w-3.5 h-3.5 text-indigo-400" />
-                Active Funds ({selectedCodes.length})
+      {/* Top Bar Contract (3 Zones, Perfectly Aligned) */}
+      <header className="border-b border-slate-800 bg-[#0f172a]/95 backdrop-blur-md sticky top-0 z-40">
+        <div className="max-w-[1720px] mx-auto w-full px-6 py-3.5 flex items-center justify-between gap-6">
+          {/* Zone 1: Brand Wordmark */}
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-600 to-emerald-400 flex items-center justify-center text-white font-bold text-sm shadow-md">
+              ₹
+            </div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-base font-bold tracking-tight text-white whitespace-nowrap">
+                Indian MF Quant Studio
               </span>
-              <button
-                onClick={() => setSelectedCodes([122639, 127042, 118989, 118778])}
-                className="text-[11px] text-indigo-400 hover:text-indigo-300 cursor-pointer"
-              >
-                Reset Curated
-              </button>
-            </div>
-
-            <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-              {Object.values(allFunds).map((fund) => {
-                const isSelected = selectedCodes.includes(fund.scheme_code);
-                return (
-                  <label
-                    key={fund.scheme_code}
-                    className={`flex items-start gap-2.5 p-2 rounded-lg text-xs cursor-pointer transition-colors border ${
-                      isSelected
-                        ? 'bg-slate-800/90 border-indigo-500/40 text-slate-100'
-                        : 'bg-slate-900/40 border-slate-800/60 text-slate-400 hover:bg-slate-800/40 hover:text-slate-300'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => handleToggleFund(fund.scheme_code)}
-                      className="mt-0.5 rounded border-slate-700 text-indigo-600 focus:ring-0 cursor-pointer"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate">{fund.name}</div>
-                      <div className="text-[10px] text-slate-500 flex items-center gap-2 mt-0.5">
-                        <span>{fund.category}</span>
-                        <span>·</span>
-                        <span className="font-mono">{fund.scheme_code}</span>
-                      </div>
-                    </div>
-                  </label>
-                );
-              })}
+              <span className="text-[11px] text-slate-400 font-mono hidden xl:inline">
+                · Institutional Terminal
+              </span>
             </div>
           </div>
 
-          {/* Add custom scheme */}
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5">
-              Add Scheme Code (mfapi.in)
-            </label>
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <input
-                  type="text"
-                  placeholder="e.g. 120503, 119598"
-                  value={customCodeInput}
-                  onChange={(e) => setCustomCodeInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleAddCustomScheme()}
-                  className="w-full bg-slate-900 border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-              <button
-                onClick={handleAddCustomScheme}
-                className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-xs font-medium text-slate-200 transition-colors"
-              >
-                Add
-              </button>
-            </div>
-          </div>
-
-          <div className="border-t border-slate-800/80 pt-5 space-y-4">
-            {/* Benchmark Selection */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
-                Benchmark Index
-              </label>
-              <select
-                value={benchmarkSymbol}
-                onChange={(e) => setBenchmarkSymbol(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-sans"
-              >
-                {BENCHMARKS.map((b) => (
-                  <option key={b.symbol} value={b.symbol}>
-                    {b.name} ({b.symbol})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Time Horizon */}
-            <div>
-              <div className="flex items-center justify-between text-xs text-slate-400 mb-1.5">
-                <span className="font-semibold uppercase tracking-wider">Analysis Horizon</span>
-                <span className="font-mono text-emerald-400">{timeHorizon} Years</span>
-              </div>
-              <div className="grid grid-cols-4 gap-1">
-                {[1, 3, 5, 7].map((yr) => (
-                  <button
-                    key={yr}
-                    onClick={() => setTimeHorizon(yr)}
-                    className={`py-1 text-xs rounded font-mono transition-colors ${
-                      timeHorizon === yr
-                        ? 'bg-indigo-600 text-white font-semibold'
-                        : 'bg-slate-900 text-slate-400 hover:bg-slate-800'
-                    }`}
-                  >
-                    {yr}Y
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Risk-free Rate */}
-            <div>
-              <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                <span className="font-semibold uppercase tracking-wider">Risk-Free Rate (Rf)</span>
-                <span className="font-mono text-indigo-400">{rfRate.toFixed(2)}%</span>
-              </div>
-              <input
-                type="range"
-                min="4.0"
-                max="9.0"
-                step="0.25"
-                value={rfRate}
-                onChange={(e) => setRfRate(parseFloat(e.target.value))}
-                className="w-full accent-indigo-500 cursor-pointer"
-              />
-              <div className="text-[10px] text-slate-500 mt-0.5">Indian 10Y Sovereign G-Sec benchmark</div>
-            </div>
-
-            {/* ADTV Liquidity Limit */}
-            <div>
-              <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                <span className="font-semibold uppercase tracking-wider">ADTV Participation</span>
-                <span className="font-mono text-amber-400">{adtvParticipation}%</span>
-              </div>
-              <input
-                type="range"
-                min="5"
-                max="30"
-                step="5"
-                value={adtvParticipation}
-                onChange={(e) => setAdtvParticipation(parseInt(e.target.value, 10))}
-                className="w-full accent-amber-500 cursor-pointer"
-              />
-              <div className="text-[10px] text-slate-500 mt-0.5">Max daily market volume limit</div>
-            </div>
-          </div>
-
-          <div className="pt-2">
-            <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-lg text-[11px] text-slate-400 space-y-1.5">
-              <div className="font-semibold text-slate-300 flex items-center gap-1.5">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                Live Ingestion Engine
-              </div>
-              <div>mfapi.in dynamic NAV sync enabled with offline calibrated fallback.</div>
-            </div>
-          </div>
-        </aside>
-
-        {/* Central Dashboard Viewport */}
-        <main className="flex-1 p-6 space-y-6 overflow-y-auto">
-          {/* Sub-Header Tabs */}
-          <div className="flex items-center gap-1 p-1 bg-slate-900/90 border border-slate-800 rounded-xl overflow-x-auto">
+          {/* Zone 2: Navigation Links */}
+          <nav className="hidden lg:flex items-center gap-6 text-xs font-medium text-slate-300">
             <button
               onClick={() => setActiveTab('perf')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                activeTab === 'perf'
-                  ? 'bg-indigo-600 text-white shadow-sm font-semibold'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              className={`transition-colors whitespace-nowrap ${
+                activeTab === 'perf' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
               }`}
             >
-              <TrendingUp className="w-4 h-4" />
-              <span>Performance &amp; Rolling Returns</span>
+              Performance &amp; Rolling
             </button>
             <button
               onClick={() => setActiveTab('risk')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                activeTab === 'risk'
-                  ? 'bg-indigo-600 text-white shadow-sm font-semibold'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              className={`transition-colors whitespace-nowrap ${
+                activeTab === 'risk' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
               }`}
             >
-              <Activity className="w-4 h-4" />
-              <span>Risk Ratios &amp; Alpha Engine</span>
+              Risk &amp; Alpha
             </button>
             <button
               onClick={() => setActiveTab('overlap')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                activeTab === 'overlap'
-                  ? 'bg-indigo-600 text-white shadow-sm font-semibold'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              className={`transition-colors whitespace-nowrap ${
+                activeTab === 'overlap' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
               }`}
             >
-              <Layers className="w-4 h-4" />
-              <span>ISIN Overlap &amp; Sectors</span>
+              ISIN Overlap &amp; Correlation
             </button>
             <button
               onClick={() => setActiveTab('stress')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                activeTab === 'stress'
-                  ? 'bg-indigo-600 text-white shadow-sm font-semibold'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              className={`transition-colors whitespace-nowrap ${
+                activeTab === 'stress' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
               }`}
             >
-              <ShieldAlert className="w-4 h-4" />
-              <span>Debt &amp; Liquidity Stress</span>
+              Debt &amp; Stress
+            </button>
+            <button
+              onClick={() => setActiveTab('sip')}
+              className={`transition-colors whitespace-nowrap ${
+                activeTab === 'sip' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
+              }`}
+            >
+              SIP Wealth Simulator
+            </button>
+            <button
+              onClick={() => setActiveTab('factsheet')}
+              className={`transition-colors whitespace-nowrap ${
+                activeTab === 'factsheet' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
+              }`}
+            >
+              Fund Factsheets
             </button>
             <button
               onClick={() => setActiveTab('python')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                activeTab === 'python'
-                  ? 'bg-indigo-600 text-white shadow-sm font-semibold'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              className={`transition-colors whitespace-nowrap ${
+                activeTab === 'python' ? 'text-indigo-400 font-bold underline underline-offset-4' : 'hover:text-white'
               }`}
             >
-              <Code2 className="w-4 h-4" />
-              <span>Python Streamlit Suite</span>
+              Python Suite
+            </button>
+          </nav>
+
+          {/* Zone 3: Quick Action Bar */}
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              onClick={() => setIsSearchModalOpen(true)}
+              className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-slate-300 bg-slate-800/90 hover:bg-slate-700 hover:text-white rounded-lg border border-slate-700/80 transition-all shadow-xs"
+              title="Search Mutual Funds (Ctrl+K)"
+            >
+              <Search className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Search Funds</span>
+              <kbd className="hidden sm:inline-block px-1.5 py-0.2 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-400 font-mono">
+                ⌘K
+              </kbd>
+            </button>
+
+            <button
+              onClick={() => setIsExportModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors whitespace-nowrap shadow-sm"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Active Comparison Strip (Chips with Remove Button) */}
+      <section className="border-b border-slate-800/80 bg-[#0c1220] py-2 px-6">
+        <div className="max-w-[1720px] mx-auto w-full flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-slate-400 font-semibold text-[11px] uppercase tracking-wider flex items-center gap-1.5">
+              <Briefcase className="w-3 h-3 text-indigo-400" />
+              Comparing ({selectedCodes.length}):
+            </span>
+
+            {activeFundsList.map((fund) => (
+              <div
+                key={fund.scheme_code}
+                className="inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-lg bg-slate-800/90 border border-slate-700/80 text-slate-200 text-xs shadow-xs"
+              >
+                <span className="truncate max-w-[150px] font-medium" title={fund.name}>
+                  {fund.name}
+                </span>
+                <span className={`text-[9px] px-1.5 py-0.2 rounded font-semibold ${
+                  fund.asset_class === 'Debt' ? 'bg-amber-950 text-amber-300' :
+                  fund.asset_class === 'Hybrid' ? 'bg-purple-950 text-purple-300' :
+                  'bg-indigo-950 text-indigo-300'
+                }`}>
+                  {fund.category}
+                </span>
+                {selectedCodes.length > 1 && (
+                  <button
+                    onClick={() => handleToggleFund(fund.scheme_code)}
+                    className="p-0.5 text-slate-400 hover:text-rose-400 rounded hover:bg-slate-700 transition-colors"
+                    title={`Remove ${fund.name} from comparison`}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            ))}
+
+            <button
+              onClick={() => setIsSearchModalOpen(true)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-dashed border-slate-700 text-indigo-400 hover:text-indigo-300 hover:border-indigo-500 text-xs transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Fund</span>
             </button>
           </div>
 
+          <div className="flex items-center gap-4 text-[11px] text-slate-400 font-mono">
+            <span>Benchmark: <span className="text-amber-400 font-semibold">{activeBenchmark.name}</span></span>
+            <span>·</span>
+            <span>Rf: <span className="text-emerald-400 font-semibold">{rfRate.toFixed(2)}%</span></span>
+            <span>·</span>
+            <span>ADTV Limit: <span className="text-sky-400 font-semibold">{adtvParticipation}%</span></span>
+          </div>
+        </div>
+      </section>
+
+      {/* Main Workspace Canvas (Full Width & Aligned) */}
+      <div className="flex-1 max-w-[1720px] w-full mx-auto px-6 py-6 flex flex-col lg:flex-row gap-6">
+        {/* Left Side Quick Parameter Drawer */}
+        <aside className="w-full lg:w-64 shrink-0 space-y-5 bg-[#0f172a]/70 border border-slate-800 rounded-xl p-4.5 self-start shadow-sm">
+          <div>
+            <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">
+              Benchmark Index
+            </label>
+            <select
+              value={benchmarkSymbol}
+              onChange={(e) => setBenchmarkSymbol(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+            >
+              {BENCHMARKS.map((b) => (
+                <option key={b.symbol} value={b.symbol}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between text-xs text-slate-300 mb-1.5">
+              <span className="font-bold uppercase tracking-wider">Analysis Horizon</span>
+              <span className="font-mono text-emerald-400 font-semibold">{timeHorizon} Years</span>
+            </div>
+            <div className="grid grid-cols-4 gap-1">
+              {[1, 3, 5, 7].map((yr) => (
+                <button
+                  key={yr}
+                  onClick={() => setTimeHorizon(yr)}
+                  className={`py-1 text-xs rounded-lg font-mono transition-colors ${
+                    timeHorizon === yr
+                      ? 'bg-indigo-600 text-white font-bold'
+                      : 'bg-slate-900 text-slate-400 hover:bg-slate-800'
+                  }`}
+                >
+                  {yr}Y
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
+              <span className="font-bold uppercase tracking-wider">Risk-Free Rate (Rf)</span>
+              <span className="font-mono text-indigo-400 font-semibold">{rfRate.toFixed(2)}%</span>
+            </div>
+            <input
+              type="range"
+              min="4.0"
+              max="9.0"
+              step="0.25"
+              value={rfRate}
+              onChange={(e) => setRfRate(parseFloat(e.target.value))}
+              className="w-full accent-indigo-500 cursor-pointer"
+            />
+            <div className="text-[10px] text-slate-500 mt-0.5">Indian 10Y Sovereign G-Sec</div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
+              <span className="font-bold uppercase tracking-wider">ADTV Participation</span>
+              <span className="font-mono text-amber-400 font-semibold">{adtvParticipation}%</span>
+            </div>
+            <input
+              type="range"
+              min="5"
+              max="30"
+              step="5"
+              value={adtvParticipation}
+              onChange={(e) => setAdtvParticipation(parseInt(e.target.value, 10))}
+              className="w-full accent-amber-500 cursor-pointer"
+            />
+            <div className="text-[10px] text-slate-500 mt-0.5">Daily market volume liquidity limit</div>
+          </div>
+
+          <div className="border-t border-slate-800 pt-3">
+            <button
+              onClick={() => setIsSearchModalOpen(true)}
+              className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors flex items-center justify-center gap-1.5"
+            >
+              <Search className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Browse All Mutual Funds</span>
+            </button>
+          </div>
+        </aside>
+
+        {/* Central Dynamic Viewport */}
+        <main className="flex-1 space-y-6 min-w-0">
           {/* ========================================================= */}
           {/* TAB 1: PERFORMANCE & ROLLING RETURNS                     */}
           {/* ========================================================= */}
@@ -647,15 +640,15 @@ export default function App() {
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                   <div>
-                    <h2 className="text-base font-semibold text-white">Cumulative Performance (Rebased to 100)</h2>
-                    <p className="text-xs text-slate-400">
-                      Standardized normalized growth comparing fund trajectories against {activeBenchmark.name} over {timeHorizon} years.
+                    <h2 className="text-base font-bold text-white tracking-tight">Cumulative Growth (Rebased to 100)</h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Normalized performance rebased to 100 at start of {timeHorizon}-year horizon against {activeBenchmark.name}.
                     </p>
                   </div>
                   {isRefreshing && (
                     <div className="flex items-center gap-1.5 text-xs text-indigo-400 font-mono">
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Syncing NAVs...</span>
+                      <span>Syncing time-series...</span>
                     </div>
                   )}
                 </div>
@@ -668,62 +661,76 @@ export default function App() {
                 />
               </div>
 
-              {/* Trailing CAGR & Hit Rate Grid */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Trailing CAGR Table & Rolling Hit Rates */}
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                 {/* Trailing CAGR Table */}
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
-                  <h3 className="text-sm font-semibold text-white mb-1">Trailing CAGR (%) Matrix</h3>
-                  <p className="text-xs text-slate-400 mb-3">Annualized point-to-point Compound Annual Growth Rates.</p>
+                  <h3 className="text-sm font-bold text-white mb-1">Trailing CAGR (%) Matrix</h3>
+                  <p className="text-xs text-slate-400 mb-3">Annualized point-to-point compound annual growth rates.</p>
 
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs font-mono text-right">
                       <thead>
                         <tr className="border-b border-slate-800 text-slate-400 font-sans">
-                          <th className="py-2 text-left font-medium">Scheme / Benchmark</th>
-                          <th className="py-2 px-2 font-medium">1Y</th>
-                          <th className="py-2 px-2 font-medium">3Y</th>
-                          <th className="py-2 px-2 font-medium">5Y</th>
-                          <th className="py-2 px-2 font-medium">7Y</th>
+                          <th className="py-2.5 text-left font-medium">Scheme / Benchmark</th>
+                          <th className="py-2.5 px-2 font-medium">1Y</th>
+                          <th className="py-2.5 px-2 font-medium">3Y</th>
+                          <th className="py-2.5 px-2 font-medium">5Y</th>
+                          <th className="py-2.5 px-2 font-medium">7Y</th>
+                          <th className="py-2.5 px-2 font-medium">10Y</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800/60">
-                        {trailingCagrMatrix.map((item) => (
-                          <tr key={item.code} className="hover:bg-slate-800/40">
-                            <td className="py-2.5 text-left font-sans text-slate-200 font-medium truncate max-w-[200px]">
-                              {item.name}
-                            </td>
-                            <td className="py-2.5 px-2 text-emerald-400 font-semibold">{item.cagr['1Y'] ?? '-'}%</td>
-                            <td className="py-2.5 px-2 text-emerald-400 font-semibold">{item.cagr['3Y'] ?? '-'}%</td>
-                            <td className="py-2.5 px-2 text-emerald-400 font-semibold">{item.cagr['5Y'] ?? '-'}%</td>
-                            <td className="py-2.5 px-2 text-emerald-400 font-semibold">{item.cagr['7Y'] ?? '-'}%</td>
-                          </tr>
-                        ))}
+                        {activeFundsList.map((fund) => {
+                          const cagr = trailingCagrMap[fund.scheme_code] || {};
+                          return (
+                            <tr key={fund.scheme_code} className="hover:bg-slate-800/40">
+                              <td className="py-2.5 text-left font-sans text-slate-200 font-medium truncate max-w-[180px]">
+                                {fund.name}
+                              </td>
+                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{cagr['1Y'] ?? '-'}%</td>
+                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{cagr['3Y'] ?? '-'}%</td>
+                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{cagr['5Y'] ?? '-'}%</td>
+                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{cagr['7Y'] ?? '-'}%</td>
+                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{cagr['10Y'] ?? '-'}%</td>
+                            </tr>
+                          );
+                        })}
                         <tr className="bg-amber-950/20 font-semibold border-t-2 border-slate-700">
                           <td className="py-2.5 text-left font-sans text-amber-300">
                             {activeBenchmark.name} (Bench)
                           </td>
-                          <td className="py-2.5 px-2 text-amber-300">{benchmarkCagr['1Y'] ?? '-'}%</td>
-                          <td className="py-2.5 px-2 text-amber-300">{benchmarkCagr['3Y'] ?? '-'}%</td>
-                          <td className="py-2.5 px-2 text-amber-300">{benchmarkCagr['5Y'] ?? '-'}%</td>
-                          <td className="py-2.5 px-2 text-amber-300">{benchmarkCagr['7Y'] ?? '-'}%</td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">{benchmarkCagr['1Y'] ?? '-'}%</td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">{benchmarkCagr['3Y'] ?? '-'}%</td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">{benchmarkCagr['5Y'] ?? '-'}%</td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">{benchmarkCagr['7Y'] ?? '-'}%</td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">{benchmarkCagr['10Y'] ?? '-'}%</td>
                         </tr>
                       </tbody>
                     </table>
                   </div>
                 </div>
 
-                {/* Benchmark Hit Rate Cards */}
+                {/* Benchmark Outperformance Hit Rate */}
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm flex flex-col justify-between">
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <h3 className="text-sm font-semibold text-white">
+                      <h3 className="text-sm font-bold text-white">
                         {rollingWindowYears}Y Rolling Benchmark Hit Rate (%)
                       </h3>
-                      <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-md text-xs font-mono">
+                      <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg text-xs font-mono">
+                        <button
+                          onClick={() => setRollingWindowYears(1)}
+                          className={`px-2 py-0.5 rounded ${
+                            rollingWindowYears === 1 ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400'
+                          }`}
+                        >
+                          1Y
+                        </button>
                         <button
                           onClick={() => setRollingWindowYears(3)}
                           className={`px-2 py-0.5 rounded ${
-                            rollingWindowYears === 3 ? 'bg-indigo-600 text-white font-semibold' : 'text-slate-400'
+                            rollingWindowYears === 3 ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400'
                           }`}
                         >
                           3Y
@@ -731,7 +738,7 @@ export default function App() {
                         <button
                           onClick={() => setRollingWindowYears(5)}
                           className={`px-2 py-0.5 rounded ${
-                            rollingWindowYears === 5 ? 'bg-indigo-600 text-white font-semibold' : 'text-slate-400'
+                            rollingWindowYears === 5 ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400'
                           }`}
                         >
                           5Y
@@ -739,26 +746,26 @@ export default function App() {
                       </div>
                     </div>
                     <p className="text-xs text-slate-400 mb-4">
-                      Percentage of rolling calendar windows where the fund outperformed {activeBenchmark.name}.
+                      Percentage of continuous {rollingWindowYears}-year rolling windows beating {activeBenchmark.name}.
                     </p>
 
-                    <div className="space-y-3">
+                    <div className="space-y-3.5">
                       {rollingAnalysis.fundsRolling.map((fund) => {
                         const hit = fund.hitRate;
                         return (
                           <div key={fund.code} className="space-y-1">
                             <div className="flex items-center justify-between text-xs">
-                              <span className="text-slate-300 font-medium truncate max-w-[220px]">
+                              <span className="text-slate-300 font-medium truncate max-w-[240px]">
                                 {fund.name}
                               </span>
                               <span className="font-mono font-bold text-emerald-400">{hit.toFixed(1)}%</span>
                             </div>
-                            <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                            <div className="w-full bg-slate-800 rounded-full h-2.5 overflow-hidden">
                               <div
                                 className="h-full rounded-full transition-all duration-500"
                                 style={{
                                   width: `${Math.min(100, Math.max(0, hit))}%`,
-                                  backgroundColor: hit > 75 ? '#10b981' : hit > 50 ? '#38bdf8' : '#f59e0b',
+                                  backgroundColor: hit > 70 ? '#10b981' : hit > 50 ? '#38bdf8' : '#fb923c',
                                 }}
                               />
                             </div>
@@ -769,24 +776,73 @@ export default function App() {
                   </div>
 
                   <div className="mt-4 pt-3 border-t border-slate-800 text-[11px] text-slate-500">
-                    Calculated over {rollingAnalysis.benchDist.count} daily rolling windows. &gt; 70% denotes institutional persistence.
+                    Evaluated over {rollingAnalysis.benchDist.count} continuous rolling trading windows.
                   </div>
                 </div>
               </div>
 
-              {/* Rolling Return Distributions Box Plots */}
+              {/* Complete Rolling Return Distributions Summary Table */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                 <div className="flex items-center justify-between mb-2">
                   <div>
-                    <h3 className="text-sm font-semibold text-white">
-                      {rollingWindowYears}-Year Rolling Return Distribution (CAGR %)
+                    <h3 className="text-sm font-bold text-white">
+                      {rollingWindowYears}-Year Rolling Return Distribution &amp; Statistical Spread
                     </h3>
                     <p className="text-xs text-slate-400">
-                      Statistical spread showing Minimum, 25th Percentile, Median, Mean, 75th Percentile, and Maximum.
+                      Mean (Average), Median, Minimum, Maximum, 25th / 75th Percentile IQR, and Positive Windows probability.
                     </p>
                   </div>
                 </div>
 
+                <div className="overflow-x-auto my-3">
+                  <table className="w-full text-xs font-mono text-right">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-slate-400 font-sans">
+                        <th className="py-2 text-left font-medium">Scheme</th>
+                        <th className="py-2 px-2 font-medium">Mean (Avg)</th>
+                        <th className="py-2 px-2 font-medium">Median</th>
+                        <th className="py-2 px-2 font-medium">Min (Worst)</th>
+                        <th className="py-2 px-2 font-medium">Max (Best)</th>
+                        <th className="py-2 px-2 font-medium">25th %ile</th>
+                        <th className="py-2 px-2 font-medium">75th %ile</th>
+                        <th className="py-2 px-2 font-medium">Std Dev</th>
+                        <th className="py-2 px-2 font-medium text-emerald-400">% Positive</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {rollingAnalysis.fundsRolling.map((f) => (
+                        <tr key={f.code} className="hover:bg-slate-800/40">
+                          <td className="py-2.5 text-left font-sans text-slate-200 font-medium truncate max-w-[180px]">
+                            {f.name}
+                          </td>
+                          <td className="py-2.5 px-2 text-emerald-400 font-bold">{f.dist.mean.toFixed(2)}%</td>
+                          <td className="py-2.5 px-2 text-white font-bold">{f.dist.median.toFixed(2)}%</td>
+                          <td className="py-2.5 px-2 text-rose-400">{f.dist.min.toFixed(2)}%</td>
+                          <td className="py-2.5 px-2 text-sky-400 font-bold">{f.dist.max.toFixed(2)}%</td>
+                          <td className="py-2.5 px-2 text-slate-300">{f.dist.q25.toFixed(2)}%</td>
+                          <td className="py-2.5 px-2 text-slate-300">{f.dist.q75.toFixed(2)}%</td>
+                          <td className="py-2.5 px-2 text-slate-400">{f.dist.std.toFixed(2)}%</td>
+                          <td className="py-2.5 px-2 text-emerald-400 font-bold">{f.dist.pctPositive.toFixed(1)}%</td>
+                        </tr>
+                      ))}
+                      <tr className="bg-amber-950/20 font-semibold border-t border-slate-700">
+                        <td className="py-2.5 text-left font-sans text-amber-300">
+                          {activeBenchmark.name} (Bench)
+                        </td>
+                        <td className="py-2.5 px-2 text-amber-300">{rollingAnalysis.benchDist.mean.toFixed(2)}%</td>
+                        <td className="py-2.5 px-2 text-amber-300">{rollingAnalysis.benchDist.median.toFixed(2)}%</td>
+                        <td className="py-2.5 px-2 text-rose-400">{rollingAnalysis.benchDist.min.toFixed(2)}%</td>
+                        <td className="py-2.5 px-2 text-amber-300">{rollingAnalysis.benchDist.max.toFixed(2)}%</td>
+                        <td className="py-2.5 px-2 text-amber-300">{rollingAnalysis.benchDist.q25.toFixed(2)}%</td>
+                        <td className="py-2.5 px-2 text-amber-300">{rollingAnalysis.benchDist.q75.toFixed(2)}%</td>
+                        <td className="py-2.5 px-2 text-slate-400">{rollingAnalysis.benchDist.std.toFixed(2)}%</td>
+                        <td className="py-2.5 px-2 text-emerald-400 font-bold">{rollingAnalysis.benchDist.pctPositive.toFixed(1)}%</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Box Plot Visualizer */}
                 <RollingBoxPlot
                   distributions={[
                     {
@@ -806,16 +862,16 @@ export default function App() {
           )}
 
           {/* ========================================================= */}
-          {/* TAB 2: QUANTITATIVE RISK & ALPHA ENGINE                   */}
+          {/* TAB 2: RISK & ALPHA ENGINE                                */}
           {/* ========================================================= */}
           {activeTab === 'risk' && (
             <div className="space-y-6">
-              {/* Comprehensive Risk Table */}
+              {/* Comprehensive Risk Matrix */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                 <div className="flex items-center justify-between mb-3">
                   <div>
-                    <h2 className="text-base font-semibold text-white">Risk-Adjusted Ratios &amp; Active Alpha</h2>
-                    <p className="text-xs text-slate-400">
+                    <h2 className="text-base font-bold text-white tracking-tight">Risk-Adjusted Ratios &amp; Active Alpha</h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
                       Evaluated against {activeBenchmark.name} at Risk-Free Rate = {rfRate.toFixed(2)}%.
                     </p>
                   </div>
@@ -833,10 +889,11 @@ export default function App() {
                         <th className="py-2.5 px-2 font-medium">Beta (β)</th>
                         <th className="py-2.5 px-2 font-medium">Jensen α</th>
                         <th className="py-2.5 px-2 font-medium">R²</th>
-                        <th className="py-2.5 px-2 font-medium">Track Error</th>
+                        <th className="py-2.5 px-2 font-medium">Track Err</th>
                         <th className="py-2.5 px-2 font-medium">Info Ratio</th>
                         <th className="py-2.5 px-2 font-medium">Max DD</th>
-                        <th className="py-2.5 px-2 font-medium">Recovery</th>
+                        <th className="py-2.5 px-2 font-medium">Calmar</th>
+                        <th className="py-2.5 px-2 font-medium">Up / Down Cap</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60">
@@ -857,7 +914,10 @@ export default function App() {
                           <td className="py-3 px-2 text-slate-300">{m.trackingError.toFixed(2)}%</td>
                           <td className="py-3 px-2 font-bold text-amber-400">{m.informationRatio.toFixed(2)}</td>
                           <td className="py-3 px-2 text-rose-400 font-semibold">{m.maxDrawdown.toFixed(2)}%</td>
-                          <td className="py-3 px-2 text-slate-400">{m.recoveryDays} days</td>
+                          <td className="py-3 px-2 text-emerald-400 font-bold">{m.calmarRatio.toFixed(2)}</td>
+                          <td className="py-3 px-2 text-slate-300">
+                            <span className="text-emerald-400">{m.upsideCapture}%</span> / <span className="text-amber-400">{m.downsideCapture}%</span>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -865,11 +925,20 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Scatter Plot & Drawdowns */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Bubble Scatter Plot */}
+              {/* Capture Ratio & Beta/Alpha Quadrants */}
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
-                  <h3 className="text-sm font-semibold text-white mb-1">
+                  <h3 className="text-sm font-bold text-white mb-1">
+                    Upside vs. Downside Capture Ratio Quadrant
+                  </h3>
+                  <p className="text-xs text-slate-400 mb-3">
+                    Assesses asymmetry: Ability to outrun the benchmark in bull runs while falling less in bear phases.
+                  </p>
+                  <CaptureRatioQuadrant metrics={riskMetricsList} />
+                </div>
+
+                <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
+                  <h3 className="text-sm font-bold text-white mb-1">
                     Beta vs. Jensen&apos;s Alpha Scatter
                   </h3>
                   <p className="text-xs text-slate-400 mb-3">
@@ -877,61 +946,39 @@ export default function App() {
                   </p>
                   <BubbleScatterPlot metrics={riskMetricsList} />
                 </div>
-
-                {/* Drawdown Summary Cards */}
-                <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
-                  <div>
-                    <h3 className="text-sm font-semibold text-white mb-1">Maximum Historical Drawdowns</h3>
-                    <p className="text-xs text-slate-400">Peak-to-trough capital decline and recovery timeframe.</p>
-                  </div>
-
-                  <div className="space-y-3">
-                    {riskMetricsList.map((m) => (
-                      <div
-                        key={m.schemeCode}
-                        className="p-3 bg-slate-950/70 border border-slate-800/80 rounded-lg flex items-center justify-between"
-                      >
-                        <div>
-                          <div className="text-xs font-semibold text-slate-200">{m.fundName}</div>
-                          <div className="text-[11px] text-slate-500 font-mono mt-0.5">
-                            Trough: {m.maxDdDate} · Peak: {m.peakDate}
-                          </div>
-                        </div>
-
-                        <div className="text-right font-mono">
-                          <div className="text-sm font-bold text-rose-400">{m.maxDrawdown.toFixed(2)}%</div>
-                          <div className="text-[10px] text-slate-400">Recovery: {m.recoveryDays}d ({m.recoveryDate})</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
               </div>
             </div>
           )}
 
           {/* ========================================================= */}
-          {/* TAB 3: PORTFOLIO OVERLAP & SECTOR ENGINE                  */}
+          {/* TAB 3: ISIN OVERLAP & RETURN CORRELATION                  */}
           {/* ========================================================= */}
           {activeTab === 'overlap' && (
             <div className="space-y-6">
               {/* Pairwise ISIN Overlap Heatmap */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                 <div className="mb-3">
-                  <h2 className="text-base font-semibold text-white">Pairwise ISIN-Level Portfolio Overlap Matrix</h2>
-                  <p className="text-xs text-slate-400">
-                    Overlap % = ∑ min(Weight_Fund_A, Weight_Fund_B) across all common ISIN security identifiers. Cash excluded.
+                  <h2 className="text-base font-bold text-white tracking-tight">Pairwise ISIN-Level Holding Overlap Matrix</h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Overlap % = ∑ min(Weight_Fund_A, Weight_Fund_B) across all shared securities. Identifies hidden stock concentration.
                   </p>
                 </div>
 
                 <OverlapHeatmap names={overlapData.names} matrix={overlapData.matrix} />
               </div>
 
+              {/* Daily Return Correlation Matrix */}
+              <CorrelationHeatmap
+                names={overlapData.corrNames}
+                matrix={overlapData.corrMatrix}
+                diversificationScore={overlapData.diversificationScore}
+              />
+
               {/* Look-through Allocations */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                 {/* Market Cap Exposure */}
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
-                  <h3 className="text-sm font-semibold text-white mb-1">
+                  <h3 className="text-sm font-bold text-white mb-1">
                     Look-Through Market-Cap Breakdown
                   </h3>
                   <p className="text-xs text-slate-400 mb-4">Aggregate underlying capitalization across portfolio.</p>
@@ -966,11 +1013,11 @@ export default function App() {
 
                 {/* Sector Concentrations */}
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
-                  <h3 className="text-sm font-semibold text-white mb-1">Top Sector Concentrations</h3>
+                  <h3 className="text-sm font-bold text-white mb-1">Top Sector Concentrations</h3>
                   <p className="text-xs text-slate-400 mb-4">Look-through industry sector exposures.</p>
 
                   <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
-                    {overlapData.sectorExposure.slice(0, 7).map((item) => (
+                    {overlapData.sectorExposure.slice(0, 8).map((item) => (
                       <div key={item.sector} className="flex items-center justify-between text-xs">
                         <span className="text-slate-300 font-medium truncate max-w-[200px]">
                           {item.sector}
@@ -991,81 +1038,6 @@ export default function App() {
                   </div>
                 </div>
               </div>
-
-              {/* Shared Holdings Inspector */}
-              <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
-                <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
-                  <div>
-                    <h3 className="text-sm font-semibold text-white">Pairwise Common Holdings Inspector</h3>
-                    <p className="text-xs text-slate-400">
-                      Drill down into underlying stock overlap contributions between two specific funds.
-                    </p>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={overlapPair[0]}
-                      onChange={(e) => setOverlapPair([parseInt(e.target.value, 10), overlapPair[1]])}
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200"
-                    >
-                      {selectedCodes.map((c) => (
-                        <option key={c} value={c}>
-                          {allFunds[c]?.name}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="text-slate-500 text-xs">vs</span>
-                    <select
-                      value={overlapPair[1]}
-                      onChange={(e) => setOverlapPair([overlapPair[0], parseInt(e.target.value, 10)])}
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200"
-                    >
-                      {selectedCodes.map((c) => (
-                        <option key={c} value={c}>
-                          {allFunds[c]?.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                {sharedHoldings.length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs font-mono">
-                      <thead>
-                        <tr className="border-b border-slate-800 text-slate-400 font-sans text-left">
-                          <th className="py-2">ISIN</th>
-                          <th className="py-2">Holding Name</th>
-                          <th className="py-2">Sector</th>
-                          <th className="py-2">Market Cap</th>
-                          <th className="py-2 text-right">Weight (Fund A)</th>
-                          <th className="py-2 text-right">Weight (Fund B)</th>
-                          <th className="py-2 text-right text-emerald-400">Overlap Contribution</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-800/60">
-                        {sharedHoldings.map((stock) => (
-                          <tr key={stock.isin} className="hover:bg-slate-800/40">
-                            <td className="py-2 text-slate-400">{stock.isin}</td>
-                            <td className="py-2 font-sans text-slate-200 font-medium">{stock.name}</td>
-                            <td className="py-2 text-slate-400">{stock.sector}</td>
-                            <td className="py-2 text-slate-400">{stock.mcap}</td>
-                            <td className="py-2 text-right text-slate-300">{stock.w1.toFixed(2)}%</td>
-                            <td className="py-2 text-right text-slate-300">{stock.w2.toFixed(2)}%</td>
-                            <td className="py-2 text-right text-emerald-400 font-bold">
-                              {stock.overlapContrib.toFixed(2)}%
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="py-8 text-center text-slate-500 text-xs">
-                    No overlapping individual equity holdings found between selected funds.
-                  </div>
-                )}
-              </div>
             </div>
           )}
 
@@ -1078,29 +1050,28 @@ export default function App() {
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-4">
                   <div>
-                    <h2 className="text-base font-semibold text-white">Portfolio Liquidity Stress Testing</h2>
-                    <p className="text-xs text-slate-400">
-                      Mandated SEBI stress horizon: Days required to liquidate 25% and 50% under {adtvParticipation}% 30-day ADTV participation limit.
+                    <h2 className="text-base font-bold text-white tracking-tight">Portfolio Liquidity Stress Testing</h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      SEBI liquidity stress horizon: Days to liquidate 25% and 50% under {adtvParticipation}% 30-day ADTV participation limit.
                     </p>
                   </div>
 
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-400">Analyzed Fund:</span>
+                    <span className="text-xs text-slate-400">Target Scheme:</span>
                     <select
                       value={stressFundCode}
                       onChange={(e) => setStressFundCode(parseInt(e.target.value, 10))}
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200 font-sans"
+                      className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200"
                     >
-                      {selectedCodes.map((c) => (
-                        <option key={c} value={c}>
-                          {allFunds[c]?.name}
+                      {activeFundsList.map((f) => (
+                        <option key={f.scheme_code} value={f.scheme_code}>
+                          {f.name}
                         </option>
                       ))}
                     </select>
                   </div>
                 </div>
 
-                {/* Metric Cards Grid */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl">
                     <div className="text-[11px] text-slate-400 uppercase font-medium">Fund AUM</div>
@@ -1147,10 +1118,10 @@ export default function App() {
                     <thead>
                       <tr className="border-b border-slate-800 text-slate-400 font-sans text-left">
                         <th className="py-2">ISIN</th>
-                        <th className="py-2">Company / Asset</th>
+                        <th className="py-2">Holding Name</th>
                         <th className="py-2 text-right">Weight</th>
                         <th className="py-2 text-right">Position (₹ Cr)</th>
-                        <th className="py-2 text-right">30D ADTV (₹ Cr)</th>
+                        <th className="py-2 text-right">30D ADTV</th>
                         <th className="py-2 text-right">Days to 100% Exit</th>
                       </tr>
                     </thead>
@@ -1161,7 +1132,7 @@ export default function App() {
                           <td className="py-2 font-sans text-slate-200 font-medium">{h.name}</td>
                           <td className="py-2 text-right text-slate-300">{h.weight.toFixed(2)}%</td>
                           <td className="py-2 text-right text-slate-300 font-semibold">₹{h.positionCr.toFixed(1)}</td>
-                          <td className="py-2 text-right text-slate-400">₹{h.adtvCr.toFixed(0)}</td>
+                          <td className="py-2 text-right text-slate-400">₹{h.adtvCr.toFixed(0)} Cr</td>
                           <td className="py-2 text-right">
                             <span
                               className={`px-2 py-0.5 rounded text-[11px] font-bold ${
@@ -1186,16 +1157,16 @@ export default function App() {
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <h3 className="text-sm font-semibold text-white">
+                    <h3 className="text-sm font-bold text-white">
                       Debt Duration &amp; Yield Curve Shock Engine
                     </h3>
-                    <p className="text-xs text-slate-400">
+                    <p className="text-xs text-slate-400 mt-0.5">
                       Macaulay &amp; Modified Duration simulation with second-order Convexity adjustments.
                     </p>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                   {/* Standard Shock Table */}
                   <div className="space-y-3">
                     <div className="text-xs font-semibold text-slate-300">
@@ -1239,7 +1210,7 @@ export default function App() {
                   <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl flex flex-col justify-between">
                     <div>
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-semibold text-slate-200">Interactive Yield Curve Shock</span>
+                        <span className="text-xs font-semibold text-slate-200">Interactive Yield Curve Shift</span>
                         <span className="font-mono text-indigo-400 font-bold text-sm">
                           {customRateShockBps > 0 ? `+${customRateShockBps}` : customRateShockBps} bps
                         </span>
@@ -1267,7 +1238,7 @@ export default function App() {
                             : `${customShockResult.totalImpactPct.toFixed(2)}%`}
                         </div>
                         <div className="text-xs font-mono text-slate-300 font-medium">
-                          New NAV: ₹{customShockResult.simulatedNav.toFixed(2)}
+                          Simulated NAV: ₹{customShockResult.simulatedNav.toFixed(2)}
                         </div>
                       </div>
                     </div>
@@ -1293,7 +1264,168 @@ export default function App() {
           )}
 
           {/* ========================================================= */}
-          {/* TAB 5: PYTHON STREAMLIT SUITE                            */}
+          {/* TAB 5: SIP WEALTH SIMULATOR & XIRR ENGINE                 */}
+          {/* ========================================================= */}
+          {activeTab === 'sip' && (
+            <div className="space-y-6">
+              <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-base font-bold text-white tracking-tight">Systematic Investment Plan (SIP) Simulator</h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Backtest rupee-cost averaging across historical daily NAV cycles and compute exact annualized XIRR.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-slate-400">Target Scheme:</span>
+                    <select
+                      value={sipTargetCode}
+                      onChange={(e) => setSipTargetCode(parseInt(e.target.value, 10))}
+                      className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200"
+                    >
+                      {activeFundsList.map((f) => (
+                        <option key={f.scheme_code} value={f.scheme_code}>
+                          {f.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl space-y-2">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="text-slate-400 font-medium">Monthly Investment</span>
+                      <span className="font-mono font-bold text-emerald-400 text-sm">₹{sipMonthlyAmount.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="1000"
+                      max="100000"
+                      step="1000"
+                      value={sipMonthlyAmount}
+                      onChange={(e) => setSipMonthlyAmount(parseInt(e.target.value, 10))}
+                      className="w-full accent-emerald-500 cursor-pointer"
+                    />
+                    <div className="text-[10px] text-slate-500">Adjust monthly SIP contribution</div>
+                  </div>
+
+                  <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl">
+                    <div className="text-[11px] text-slate-400 uppercase font-medium">Accumulated Corpus</div>
+                    <div className="text-xl font-bold font-mono text-emerald-400 mt-1">
+                      ₹{sipResult.totalCorpus.toLocaleString()}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">
+                      Invested: ₹{sipResult.totalInvested.toLocaleString()} · Net Gain: +₹{sipResult.absoluteProfit.toLocaleString()}
+                    </div>
+                  </div>
+
+                  <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl">
+                    <div className="text-[11px] text-slate-400 uppercase font-medium">Annualized XIRR</div>
+                    <div className="text-xl font-bold font-mono text-indigo-400 mt-1">
+                      {sipResult.xirrPct}%
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">
+                      Internal Rate of Return over {timeHorizon} years
+                    </div>
+                  </div>
+                </div>
+
+                <SipGrowthChart
+                  simulation={sipResult}
+                  fundName={allFunds[sipTargetCode]?.name || 'Target Fund'}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB 6: FUND FACTSHEETS & QUALITATIVE DOSSIER              */}
+          {/* ========================================================= */}
+          {activeTab === 'factsheet' && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-bold text-white tracking-tight">Fund Factsheets &amp; Manager Dossiers</h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Official qualitative profiles, portfolio turnover, SEBI riskometer ratings, and lead manager tenures.
+                  </p>
+                </div>
+
+                <button
+                  onClick={() => setIsSearchModalOpen(true)}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors flex items-center gap-1.5"
+                >
+                  <Search className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Browse More Factsheets</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                {activeFundsList.map((fund) => (
+                  <div
+                    key={fund.scheme_code}
+                    className="p-5 bg-slate-900/70 border border-slate-800 hover:border-slate-700 rounded-xl space-y-4 shadow-sm"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h3 className="text-sm font-bold text-white">{fund.name}</h3>
+                          <span className="text-[10px] px-2 py-0.5 rounded font-semibold bg-indigo-950 text-indigo-300 border border-indigo-800/60">
+                            {fund.category}
+                          </span>
+                        </div>
+                        <div className="text-xs text-slate-400 mt-0.5 font-mono">
+                          {fund.fund_house} · ISIN: {fund.isin}
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => setFactsheetFund(fund)}
+                        className="px-2.5 py-1 bg-slate-800 hover:bg-indigo-600 text-slate-200 hover:text-white rounded-lg text-xs font-medium transition-colors shrink-0"
+                      >
+                        Deep Dive
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      <div className="p-2.5 bg-slate-950/80 rounded-lg">
+                        <div className="text-slate-400 text-[10px]">AUM</div>
+                        <div className="font-mono font-bold text-white mt-0.5">₹{fund.aum_cr.toLocaleString()} Cr</div>
+                      </div>
+                      <div className="p-2.5 bg-slate-950/80 rounded-lg">
+                        <div className="text-slate-400 text-[10px]">TER (Direct)</div>
+                        <div className="font-mono font-bold text-emerald-400 mt-0.5">{fund.expense_ratio_direct}%</div>
+                      </div>
+                      <div className="p-2.5 bg-slate-950/80 rounded-lg">
+                        <div className="text-slate-400 text-[10px]">Turnover</div>
+                        <div className="font-mono font-bold text-amber-400 mt-0.5">{fund.turnover_ratio_pct}%</div>
+                      </div>
+                    </div>
+
+                    <div className="p-3 bg-slate-950/60 border border-slate-800/70 rounded-lg space-y-1 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-slate-200">{fund.manager.name}</span>
+                        <span className="font-mono text-emerald-400 text-[11px] font-semibold">{fund.manager.tenureYears} yrs on fund</span>
+                      </div>
+                      <p className="text-slate-400 line-clamp-2 text-[11px] leading-relaxed">
+                        {fund.manager.bio}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between text-xs text-slate-400 pt-1 border-t border-slate-800">
+                      <span>Riskometer: <span className="font-semibold text-rose-400">{fund.riskometer}</span></span>
+                      <span>Min SIP: <span className="font-mono font-semibold text-white">₹{fund.min_sip_inr}</span></span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB 7: PYTHON STREAMLIT SUITE                            */}
           {/* ========================================================= */}
           {activeTab === 'python' && (
             <div className="space-y-6">
@@ -1302,6 +1434,33 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Global Modals */}
+      <FundSearchModal
+        isOpen={isSearchModalOpen}
+        onClose={() => setIsSearchModalOpen(false)}
+        availableFunds={allFunds}
+        selectedCodes={selectedCodes}
+        onToggleFund={handleToggleFund}
+        onAddCustomScheme={handleAddCustomScheme}
+      />
+
+      <FundFactsheetModal
+        fund={factsheetFund}
+        isOpen={!!factsheetFund}
+        onClose={() => setFactsheetFund(null)}
+      />
+
+      <DataExportModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+        selectedFunds={activeFundsList}
+        riskMetrics={riskMetricsList}
+        trailingCagrMap={trailingCagrMap}
+        seriesMap={fundSeriesMap}
+        benchmarkSeries={benchmarkSeries}
+        benchmarkName={activeBenchmark.name}
+      />
     </div>
   );
 }

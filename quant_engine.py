@@ -1,11 +1,12 @@
 """
 Module 2: Quantitative Risk Engine (quant_engine.py)
 Vectorized Pandas and NumPy functions for computing:
-- Trailing & Rolling Returns (CAGR, Distributions, 3Y/5Y windows)
+- Trailing & Rolling Returns (CAGR, Distributions, 1Y/3Y/5Y windows)
 - Benchmark Hit Rates (% of rolling periods outperforming benchmark)
 - Risk Ratios: Annualized Volatility, Sharpe, Sortino (configurable Rf)
 - Capital Market Line Metrics: Beta, Jensen's Alpha, R-Squared
 - Active Metrics: Tracking Error, Information Ratio, Max Drawdown & Recovery Periods
+- Upside & Downside Capture Ratios, Calmar Ratio
 """
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 
-def compute_trailing_cagr(series: pd.Series, periods_years: List[int] = [1, 3, 5, 7]) -> Dict[str, float]:
+def compute_trailing_cagr(series: pd.Series, periods_years: List[int] = [1, 3, 5, 7, 10]) -> Dict[str, float]:
     """
     Compute annualized Compound Annual Growth Rate (CAGR) for specific trailing calendar periods.
     Formula: CAGR = (P_end / P_start) ** (1 / years) - 1
@@ -28,14 +29,12 @@ def compute_trailing_cagr(series: pd.Series, periods_years: List[int] = [1, 3, 5
 
     for years in periods_years:
         target_start_date = end_date - pd.DateOffset(years=years)
-        # Find closest date on or before target_start_date
         sub = cleaned[cleaned.index <= target_start_date]
         if not sub.empty:
             start_price = sub.iloc[-1]
             cagr = (end_price / start_price) ** (1.0 / years) - 1.0
             results[f"{years}Y"] = round(cagr * 100.0, 2)
         else:
-            # Fallback if fund history is shorter: annualized total return if >= 1 year
             days_available = (end_date - cleaned.index[0]).days
             if days_available >= 300:
                 years_avail = days_available / 365.25
@@ -61,7 +60,6 @@ def compute_rolling_returns(
     if len(cleaned) <= window_days:
         return pd.Series(dtype=float)
 
-    # Shifted series for exact vectorized CAGR
     shifted = cleaned.shift(window_days)
     rolling_cagr = (cleaned / shifted) ** (trading_days_per_year / window_days) - 1.0
     return rolling_cagr.dropna()
@@ -70,13 +68,18 @@ def compute_rolling_returns(
 def compute_rolling_distribution_stats(rolling_series: pd.Series) -> Dict[str, float]:
     """
     Compute statistical distribution metrics for rolling returns:
-    Mean, Median, Min, Max, 25th percentile, 75th percentile, Std.
+    Mean (Avg), Median, Min (Worst), Max (Best), 25th percentile, 75th percentile,
+    Standard Deviation, and % of Positive / Negative Windows.
     """
     if rolling_series.empty:
         return {
             "mean": 0.0, "median": 0.0, "min": 0.0, "max": 0.0,
-            "q25": 0.0, "q75": 0.0, "std": 0.0, "count": 0
+            "q25": 0.0, "q75": 0.0, "std": 0.0, "pct_positive": 0.0,
+            "pct_negative": 0.0, "count": 0
         }
+
+    pct_pos = (rolling_series > 0).mean() * 100.0
+    pct_neg = (rolling_series <= 0).mean() * 100.0
 
     return {
         "mean": round(float(rolling_series.mean() * 100.0), 2),
@@ -86,6 +89,8 @@ def compute_rolling_distribution_stats(rolling_series: pd.Series) -> Dict[str, f
         "q25": round(float(rolling_series.quantile(0.25) * 100.0), 2),
         "q75": round(float(rolling_series.quantile(0.75) * 100.0), 2),
         "std": round(float(rolling_series.std() * 100.0), 2),
+        "pct_positive": round(float(pct_pos), 1),
+        "pct_negative": round(float(pct_neg), 1),
         "count": len(rolling_series)
     }
 
@@ -97,7 +102,6 @@ def compute_benchmark_hit_rate(
     """
     Calculate Benchmark Hit Rate:
     Percentage of rolling windows where the fund's annualized return exceeded benchmark.
-    Formula: (Count(Fund_Rolling > Bench_Rolling) / Total_Common_Windows) * 100%
     """
     aligned = pd.concat([fund_rolling.rename("fund"), benchmark_rolling.rename("bench")], axis=1).dropna()
     if aligned.empty:
@@ -105,7 +109,7 @@ def compute_benchmark_hit_rate(
 
     outperformed_count = (aligned["fund"] > aligned["bench"]).sum()
     hit_rate = (outperformed_count / len(aligned)) * 100.0
-    return round(float(hit_rate), 2)
+    return round(float(hit_rate), 1)
 
 
 def compute_risk_ratios(
@@ -115,27 +119,19 @@ def compute_risk_ratios(
 ) -> Dict[str, float]:
     """
     Vectorized computation of Volatility, Sharpe Ratio, and Sortino Ratio.
-    - Volatility (Annualized): std(R) * sqrt(252)
-    - Sharpe: (CAGR - Rf) / Annualized_Vol
-    - Sortino: (CAGR - Rf) / Downside_Semi_Deviation (relative to Rf/252)
     """
     ret = returns_series.dropna()
     if len(ret) < 20:
         return {"volatility": 0.0, "sharpe": 0.0, "sortino": 0.0, "annualized_return": 0.0}
 
-    # Annualized arithmetic / geometric return
     cum_ret = (1.0 + ret).prod()
     n_days = len(ret)
     ann_return = (cum_ret ** (trading_days_per_year / n_days)) - 1.0
 
-    # Annualized Volatility
     ann_vol = float(ret.std() * np.sqrt(trading_days_per_year))
-
-    # Sharpe Ratio
     excess_return = ann_return - rf_annual
     sharpe = float(excess_return / ann_vol) if ann_vol > 1e-6 else 0.0
 
-    # Sortino Ratio: Downside deviation relative to daily Rf
     rf_daily = (1.0 + rf_annual) ** (1.0 / trading_days_per_year) - 1.0
     downside_diff = np.minimum(0.0, ret - rf_daily)
     downside_variance = np.mean(downside_diff ** 2)
@@ -169,10 +165,8 @@ def compute_cml_metrics(
     cov_matrix = np.cov(aligned["fund"], aligned["bench"])
     var_bench = cov_matrix[1, 1]
     cov_fb = cov_matrix[0, 1]
-
     beta = float(cov_fb / var_bench) if var_bench > 1e-8 else 1.0
 
-    # Annualized returns for Alpha
     cum_fund = (1.0 + aligned["fund"]).prod()
     cum_bench = (1.0 + aligned["bench"]).prod()
     n_days = len(aligned)
@@ -180,17 +174,15 @@ def compute_cml_metrics(
     ann_ret_fund = (cum_fund ** (trading_days_per_year / n_days)) - 1.0
     ann_ret_bench = (cum_bench ** (trading_days_per_year / n_days)) - 1.0
 
-    # Jensen's Alpha
     expected_return = rf_annual + beta * (ann_ret_bench - rf_annual)
     jensens_alpha = float(ann_ret_fund - expected_return)
 
-    # R-squared
     corr = np.corrcoef(aligned["fund"], aligned["bench"])[0, 1]
     r_squared = float(corr ** 2) if not np.isnan(corr) else 0.0
 
     return {
         "beta": round(beta, 2),
-        "alpha": round(jensens_alpha * 100.0, 2),  # in percentage
+        "alpha": round(jensens_alpha * 100.0, 2),
         "r2": round(r_squared, 3),
     }
 
@@ -201,18 +193,19 @@ def compute_active_metrics(
     trading_days_per_year: int = 252
 ) -> Dict[str, float]:
     """
-    Compute Active Management Metrics:
+    Active Management Metrics:
     - Tracking Error: Annualized standard deviation of excess daily returns
     - Information Ratio: Annualized excess return / Tracking Error
+    - Upside Capture Ratio (%)
+    - Downside Capture Ratio (%)
     """
     aligned = pd.concat([fund_returns.rename("fund"), benchmark_returns.rename("bench")], axis=1).dropna()
     if len(aligned) < 20:
-        return {"tracking_error": 0.0, "information_ratio": 0.0}
+        return {"tracking_error": 0.0, "information_ratio": 0.0, "upside_capture": 100.0, "downside_capture": 100.0}
 
     diff = aligned["fund"] - aligned["bench"]
     tracking_error = float(diff.std() * np.sqrt(trading_days_per_year))
 
-    # Annualized excess return
     n_days = len(aligned)
     ann_fund = ((1.0 + aligned["fund"]).prod() ** (trading_days_per_year / n_days)) - 1.0
     ann_bench = ((1.0 + aligned["bench"]).prod() ** (trading_days_per_year / n_days)) - 1.0
@@ -220,16 +213,26 @@ def compute_active_metrics(
 
     info_ratio = float(excess_ann / tracking_error) if tracking_error > 1e-6 else 0.0
 
+    # Capture Ratios
+    up_fund = aligned[aligned["bench"] > 0]["fund"].sum()
+    up_bench = aligned[aligned["bench"] > 0]["bench"].sum()
+    upside_cap = (up_fund / up_bench) * 100.0 if up_bench != 0 else 100.0
+
+    down_fund = aligned[aligned["bench"] < 0]["fund"].sum()
+    down_bench = aligned[aligned["bench"] < 0]["bench"].sum()
+    downside_cap = (down_fund / down_bench) * 100.0 if down_bench != 0 else 100.0
+
     return {
         "tracking_error": round(tracking_error * 100.0, 2),
         "information_ratio": round(info_ratio, 2),
+        "upside_capture": round(upside_cap, 1),
+        "downside_capture": round(downside_cap, 1),
     }
 
 
 def compute_drawdowns(price_series: pd.Series) -> Dict[str, Any]:
     """
-    Compute Drawdown series, Maximum Drawdown, and Recovery Period.
-    Formula: Drawdown_t = (P_t - CumMax_t) / CumMax_t
+    Compute Drawdown series, Maximum Drawdown, Recovery Period, and Calmar Ratio.
     """
     cleaned = price_series.dropna().sort_index()
     if cleaned.empty:
@@ -239,6 +242,7 @@ def compute_drawdowns(price_series: pd.Series) -> Dict[str, Any]:
             "peak_date": "",
             "recovery_date": "",
             "recovery_days": 0,
+            "calmar_ratio": 0.0,
             "drawdown_series": pd.Series(dtype=float)
         }
 
@@ -248,12 +252,10 @@ def compute_drawdowns(price_series: pd.Series) -> Dict[str, Any]:
     min_dd = float(drawdown_series.min())
     max_dd_idx = drawdown_series.idxmin()
 
-    # Find the peak that preceded the max drawdown
     sub_peak = cleaned.loc[:max_dd_idx]
     peak_val = sub_peak.max()
     peak_idx = sub_peak[sub_peak == peak_val].index[-1]
 
-    # Find recovery: first date after max drawdown where price >= peak_val
     sub_recovery = cleaned.loc[max_dd_idx:]
     recovered = sub_recovery[sub_recovery >= peak_val]
 
@@ -262,8 +264,12 @@ def compute_drawdowns(price_series: pd.Series) -> Dict[str, Any]:
         recovery_days = (recovery_idx - peak_idx).days
         recovery_str = recovery_idx.strftime("%Y-%m-%d")
     else:
-        recovery_str = "Ongoing / Not Recovered"
+        recovery_str = "Ongoing"
         recovery_days = (cleaned.index[-1] - peak_idx).days
+
+    total_days = (cleaned.index[-1] - cleaned.index[0]).days
+    ann_return = (cleaned.iloc[-1] / cleaned.iloc[0]) ** (365.25 / total_days) - 1.0 if total_days > 100 else 0.0
+    calmar = ann_return / abs(min_dd) if abs(min_dd) > 1e-4 else 0.0
 
     return {
         "max_drawdown": round(min_dd * 100.0, 2),
@@ -271,5 +277,6 @@ def compute_drawdowns(price_series: pd.Series) -> Dict[str, Any]:
         "peak_date": peak_idx.strftime("%Y-%m-%d") if hasattr(peak_idx, "strftime") else str(peak_idx),
         "recovery_date": recovery_str,
         "recovery_days": recovery_days,
+        "calmar_ratio": round(calmar, 2),
         "drawdown_series": drawdown_series
     }

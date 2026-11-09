@@ -1,111 +1,87 @@
-# Indian Mutual Funds Quantitative & Portfolio Risk Analytics Platform
+# Comprehensive Mutual Fund Analytics Suite Overhaul (Enhanced Edition)
 
-A production-grade, institutional-quality quantitative analytics dashboard for Indian Mutual Funds and an exportable modular Python Streamlit application (`data_loader.py`, `quant_engine.py`, `overlap_engine.py`, `stress_test.py`, `app.py`). It enables dynamic historical NAV ingestion via mfapi.in and benchmark series, vectorized performance and risk analytics (CAGR, rolling returns, Sharpe, Sortino, Jensen's Alpha, Beta, Tracking Error, Drawdowns), ISIN-level portfolio overlap matrix, liquidity stress testing (30-day ADTV), and interest rate duration sensitivity simulations.
+A production-grade institutional redesign of the Indian Mutual Funds Quantitative & Risk Analytics Platform. Incorporates user specifications (UI decluttering, global search modal, asset-class specific metrics, qualitative factsheets, complete rolling statistics, multi-format CSV/JSON exports) and **complementary quantitative features**: **SIP Wealth Simulator & XIRR Engine**, **Daily Return Correlation Matrix & Diversification Score**, **Upside vs Downside Capture Ratio Quadrant**, and **Universal Fund Screener**.
 
 ---
 
 ### User Review & Critical Decisions
 
 > [!IMPORTANT]
-> Key design and architecture decisions confirmed based on your requirements:
-> - **Dual-Delivery Architecture**: An interactive, responsive institutional-grade dashboard running directly in the workspace, complemented by a complete modular Python Streamlit suite (`data_loader.py`, `quant_engine.py`, `overlap_engine.py`, `stress_test.py`, `app.py`) with 1-click code export and download.
-> - **Preset Portfolio**: Curated blend across major market segments—Parag Parikh Flexi Cap (`122639`), Motilal Oswal Midcap (`127042`), HDFC Top 100 Large Cap (`118989`), and Nippon India Small Cap (`118778`), benchmarked against Nifty 50, Nifty 500, and Nifty Midcap 150.
-> - **Liquidity & Stress Horizon**: 30-day Average Daily Trading Volume (ADTV) baseline with 10% market participation threshold for calculating 25% and 50% liquidation horizons.
+> Key architectural decisions and newly integrated complementary features:
+> - **Global Fund Search & Universal Catalog**: A `Cmd+K` / Search modal allowing search across all SEBI categories (Equity: Large, Mid, Small, Flexi, Multi, ELSS; Debt: Corporate Bond, Banking & PSU, Liquid, Gilt; Hybrid: Aggressive, Arbitrage, Balanced Advantage; Commodities: Gold; International FoF).
+> - **Asset-Class Adaptive Metrics**:
+>   - **Debt Funds**: Yield to Maturity (YTM), Macaulay Duration, Modified Duration, Average Maturity, Credit Quality Distribution (% AAA, % AA+, % Sovereign, % Cash), Rate Sensitivity.
+>   - **Equity Funds**: Rolling CAGR distributions, Beta, Alpha, Sharpe, Sortino, Active Share, ISIN Overlap.
+>   - **Hybrid Funds**: Look-through Equity/Debt asset allocation breakdown.
+> - **Complete Statistical Distribution**: Min, 25th Percentile, Median, Mean (Average), 75th Percentile, Max, Std Dev, % Positive Windows, % Negative Windows, and Calmar Ratio.
+> - **Complementary Additions**:
+>   1. **SIP Wealth Builder & XIRR Simulator**: Compare lump-sum CAGR with monthly SIP wealth creation (₹ / XIRR) over 1Y, 3Y, 5Y, and 10Y.
+>   2. **Return Correlation Matrix & Portfolio Diversification Score (0–100%)**: Pairwise time-series return correlations alongside ISIN holding overlap.
+>   3. **Upside vs Downside Capture Ratio Quadrant**: Visualizing bull market participation vs bear market protection.
+>   4. **Qualitative Factsheet Dossier**: Fund Manager tenure, credentials, investment philosophy, turnover ratio, expense ratio, and riskometer.
+>   5. **Multi-Format Exporter**: Full CSV comparison, structured JSON, individual fund factsheets, and raw historical NAV series.
 
 ---
 
-### 1. Overview & Core Concept
+### 1. Overview & Architecture
 
-- **What It Does**: Provides portfolio managers, wealth advisors, and quantitative analysts with deep diagnostic tools for Indian mutual funds. Combines time-series performance evaluation with structural portfolio risk: rolling return distributions, benchmark outperformance hit-rates, capital market line metrics, pairwise ISIN overlap, sector and market-cap look-throughs, portfolio liquidity liquidation timeframes, and fixed-income duration shock models.
-- **Target Audience**: Quant analysts, mutual fund distributors (MFDs), registered investment advisors (RIAs), and individual retail quants analyzing Indian equities and hybrid/debt allocations.
-- **Key Value**: Replaces surface-level point-to-point returns with institutional risk metrics: rolling return consistency, true holding overlap (avoiding duplicate underlying stock concentration), market liquidity constraints, and interest rate sensitivity.
-
----
-
-### 2. User Experience & Visual Design
-
-Following SaaS & Quantitative Dashboard guidelines (`references/3_saas_dashboard.md`):
-- **Layout & Canvas**: High-density institutional layout with a collapsible sidebar for fund selection, benchmark index switcher, date window selector (1Y, 3Y, 5Y, Max), and risk-free rate adjustment slider (default 6.5% for Indian 10Y G-Sec).
-- **Navigation Tabs**:
-  1. **Performance & Rolling Engine**: Cumulative NAV growth rebased to 100 vs. benchmark, annual CAGR matrix (1Y, 3Y, 5Y, 7Y), 3Y and 5Y rolling return distribution box plots (Mean, Median, 25th/75th percentiles, Min, Max), and Benchmark Hit Rate (% of periods beating benchmark).
-  2. **Risk & Capital Market Metrics**: Annualized Volatility, Sharpe Ratio, Sortino Ratio, Maximum Drawdown curve with peak-to-trough recovery duration, Beta vs. Jensen's Alpha scatter plot with bubble sizes reflecting Information Ratio, and R² against the benchmark.
-  3. **Portfolio Overlap & Holdings**: Dynamic $N \times N$ pairwise ISIN overlap matrix ($\sum \min(w_A, w_B)$), look-through Large/Mid/Small cap allocation stack, top sector concentration comparisons, and shared stock exposure drill-down.
-  4. **Liquidity & Duration Stress Test**: 30-day ADTV days-to-liquidate gauge (25% and 50% redemption scenarios), Macaulay and Modified duration sensitivity curve with interactive interest rate shock slider ($\pm 50$, $\pm 100$, $\pm 200$ bps).
-  5. **Python Streamlit Code Suite**: Code viewer with syntax highlighting and instant download for all 5 Python modules (`data_loader.py`, `quant_engine.py`, `overlap_engine.py`, `stress_test.py`, `app.py`, plus `requirements.txt`).
-- **Typography & Color Palette**:
-  - *Typography*: Plus Jakarta Sans for crisp display and navigation, paired with JetBrains Mono / tabular numerals (`tabular-nums`) for exact decimal vertical alignment across financial tables.
-  - *Palette*: Deep Slate/Navy canvas (`#0b0f19` / `#111827`), clean muted borders (`#1f2937`), emerald for positive alpha and returns (`#10b981`), crimson for drawdowns and negative shocks (`#ef4444`), and indigo/cyan accents for benchmark references (`#6366f1` / `#06b6d4`).
+- **Visual Layout & Scaling**: Container locked to `max-w-[1720px] mx-auto w-full px-6`, strictly aligned with the top navigation bar. Expanded chart heights ($420\text{px}$–$480\text{px}$) with responsive SVG scaling.
+- **Top Navigation Bar**: Wordmark `Indian MF Quant Studio`, 6 specialized tabs, Quick-Search button (`Ctrl+K`), Compare Counter chips with instant removal, and Export button.
+- **Tabs**:
+  1. **Performance & Rolling Engine**: Cumulative growth rebased to 100, Trailing CAGR matrix (1Y, 3Y, 5Y, 7Y), 1Y/3Y/5Y rolling return distribution box plots, full statistical summary table, and Benchmark Hit Rate progress bars (with 10Y+ historical alignment resolving the 5Y hit-rate bug).
+  2. **Risk & Capital Market Metrics**: Comprehensive risk matrix (Sharpe, Sortino, Volatility, Beta, Jensen's Alpha, R², Tracking Error, Information Ratio, Calmar Ratio, Max Drawdown & Recovery Days), Beta vs Alpha bubble plot, and Upside/Downside Capture Quadrant.
+  3. **Portfolio Overlap & Correlation**: Pairwise ISIN overlap matrix ($\sum \min(W_A, W_B)$), daily return correlation matrix, Portfolio Diversification Score (0–100%), look-through Market Cap and Sector breakdowns, and common holdings inspector.
+  4. **Debt & Liquidity Stress Testing**: 30-day ADTV days to liquidate 25% and 50% (waterfall & pro-rata), position-level liquidity table, Macaulay & Modified duration table with rate shock grid, and interactive yield curve shock slider with live simulated NAV.
+  5. **SIP Simulator & Wealth Builder**: Dynamic Monthly SIP calculation across selected funds and benchmark, computing invested capital, accumulated corpus, and annualized XIRR.
+  6. **Fund Factsheets & Qualitative Dossier**: Manager profiles (name, tenure, experience, active funds), fund facts (inception date, AUM, expense ratio, turnover ratio, riskometer), and category classification.
+  7. **Python Streamlit Suite & Data Export**: Code viewer and direct downloads for all 5 Python modules (`data_loader.py`, `quant_engine.py`, `overlap_engine.py`, `stress_test.py`, `app.py`, `requirements.txt`), plus multi-format CSV and JSON exports.
 
 ---
 
-### 3. Key Technical Decisions & Modular Python Architecture
+### 2. Component Hierarchy & Flow
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        DATA PIPELINE & INGESTION                       │
-│  api.mfapi.in/mf/{scheme_code}   │   yfinance (Nifty 50, 500, Mid 150)  │
+│               TOP BAR: Brand · Tabs · Search · Compare · Export        │
 └──────────────────────────────────┬─────────────────────────────────────┘
                                    │
-                   ┌───────────────┴───────────────┐
-                   ▼                               ▼
-       In-Memory SQLite (:memory:)     Pandas / React State Cache
-       Normalized Daily Date Series    Merged Fund & Benchmark NAVs
-                   │                               │
-       ┌───────────┴───────────────────────────────┴───────────┐
+       ┌───────────────────────────┴───────────────────────────┐
        ▼                                                       ▼
 ┌──────────────────────────────┐        ┌──────────────────────────────┐
-│     QUANTITATIVE ENGINE      │        │     PORTFOLIO OVERLAP &      │
-│  - CAGR (1Y, 3Y, 5Y, 7Y)     │        │        STRESS TESTING        │
-│  - 3Y/5Y Rolling Returns     │        │  - ISIN Overlap Matrix       │
-│  - Benchmark Hit Rate        │        │  - Market Cap & Sector Mix   │
-│  - Sharpe / Sortino (Rf 6.5%)│        │  - 30D ADTV Liquidity Stress │
-│  - Beta, Alpha, R2, IR, TE   │        │  - Duration Rate Shocks      │
-│  - Max Drawdown & Recovery   │        │    (Macaulay & Mod Duration) │
-└──────────────┬───────────────┘        └──────────────┬───────────────┘
-               │                                       │
-               └───────────────────┬───────────────────┘
-                                   │
-                                   ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                     PRESENTATION & EXPORT LAYER                        │
-│  Interactive Institutional Dashboard   │   Exportable Python Modules:  │
-│  (Plotly Charts, Risk Tables, Heatmaps)│   data_loader.py, quant_engine│
-│                                        │   overlap_engine, stress_test │
-│                                        │   app.py (Streamlit runnable) │
-└────────────────────────────────────────────────────────────────────────┘
+│  SIDEBAR: Quick Filters      │        │  CENTRAL WORKSPACE CANVAS    │
+│  - Active Fund Chips         │        │  - Tab 1: Performance & Roll │
+│  - Global Search (Ctrl+K)    │        │  - Tab 2: Risk & Alpha       │
+│  - Benchmark Index Selector  │        │  - Tab 3: Overlap & Corr     │
+│  - Horizon & Rf Rate         │        │  - Tab 4: Debt & Stress      │
+│  - ADTV Participation Limit  │        │  - Tab 5: SIP Wealth Builder │
+│  - Category Switcher         │        │  - Tab 6: Qualitative Facts  │
+└──────────────────────────────┘        │  - Tab 7: Python Suite & Data│
+                                        └──────────────────────────────┘
 ```
-
-#### Detailed Module Specifications:
-1. **Module 1 (`data_loader.py`)**:
-   - Ingestion from `https://api.mfapi.in/mf/{scheme_code}` with date parsing (`DD-MM-YYYY` to ISO), error resilience for missing days, and forward-filling for holidays.
-   - Benchmark ingestion via Yahoo Finance symbols (`^NSEI`, `^CRSLDX`, `NIFTYMIDCAP150.NS`).
-   - SQLite `:memory:` database schema with tables `fund_nav` and `benchmark_nav` indexed on `(scheme_code, nav_date)`.
-2. **Module 2 (`quant_engine.py`)**:
-   - Vectorized rolling returns using rolling calendar windows (756 trading days for 3Y, 1260 trading days for 5Y).
-   - Benchmark Hit Rate: $\frac{\text{Count}(\text{Rolling Fund} > \text{Rolling Benchmark})}{\text{Total Windows}} \times 100\%$.
-   - Annualized Sharpe: $\frac{\bar{R}_p - R_f}{\sigma_p \sqrt{252}}$, Sortino using downside semi-deviation $\sqrt{\frac{1}{N}\sum \min(R_t - R_f/252, 0)^2 \times 252}$.
-   - Regression for Beta ($\frac{\text{Cov}(R_p, R_m)}{\text{Var}(R_m)}$), Jensen's Alpha ($R_p - [R_f + \beta(R_m - R_f)]$), and $R^2$.
-   - Max Drawdown: Peak cumulative return tracking and days between peak and recovery.
-3. **Module 3 (`overlap_engine.py`)**:
-   - Pairwise overlap: $\text{Overlap}(A, B) = \sum_{i \in A \cap B} \min(W_{A,i}, W_{B,i})$.
-   - Market cap classification breakdown (Large Cap top 100, Mid Cap 101–250, Small Cap 251+) and sector classification (Financial Services, Technology, Consumer Goods, Healthcare, Industrials, etc.).
-4. **Module 4 (`stress_test.py`)**:
-   - Days to liquidate $P\%$ portfolio: For each holding $i$, $\text{Days}_i = \frac{W_i \times \text{AUM}}{\text{ADTV}_i \times 10\% \text{ participation}}$. Portfolio liquidation threshold calculated via weighted liquidity curves for 25% and 50% redemption demands.
-   - Macaulay & Modified Duration NAV shock: $\Delta \text{NAV} \approx -D_{\text{mod}} \times \Delta y + \frac{1}{2} C \times (\Delta y)^2$.
-5. **Module 5 (`app.py`)**:
-   - Complete multi-tab Streamlit application with `st.sidebar`, Plotly charts, interactive sliders, and fallback data for instant zero-configuration local execution (`streamlit run app.py`).
 
 ---
 
-### 4. Implementation Steps & Verification Plan
+### 3. Implementation Steps & Verification Plan
 
-1. **Backend / Data Layer**:
-   - Express proxy endpoint in `server.ts` to seamlessly proxy `mfapi.in` to prevent any browser CORS limitations, while providing instantaneous cached fallback metrics for offline resilience.
-   - Export bundle generator packaging all 5 Python files and `requirements.txt`.
-2. **Frontend Quant Analytics Engine**:
-   - TypeScript quant math engine duplicating Python NumPy/Pandas logic with identical precision for instant client-side interactivity.
-   - High-density visual components: Rebased performance chart, rolling return distributions, risk metric matrix, alpha vs beta scatter plot, overlap heatmap, sector breakdown, and interest rate sensitivity simulator.
-3. **Python Code Repository & Exporter**:
-   - Provide full source code viewer with copy buttons and single-zip or direct script download for `data_loader.py`, `quant_engine.py`, `overlap_engine.py`, `stress_test.py`, `app.py`, and `requirements.txt`.
-4. **Verification**:
-   - Run `compile_applet` and `lint_applet` to verify TypeScript builds, ensure zero runtime warnings, test all interactive controls, and test API ingestion.
+1. **Expanded Data Models & Catalog (`src/types/quant.ts` & `src/data/presetFunds.ts`)**:
+   - Universal fund catalog across Equity, Debt, Hybrid, Gold, and International FoFs.
+   - Qualitative manager profiles and factsheet fields.
+   - 10Y+ historical NAV series generator and live `mfapi.in` dynamic lookup for all ~40,000 AMFI schemes.
+2. **Enhanced Quantitative Engine (`src/utils/quantEngine.ts`)**:
+   - Full rolling statistics (Min, Max, Mean, Median, Q25, Q75, Std, % Positive, % Negative).
+   - Upside/Downside Capture Ratios, Calmar Ratio.
+   - Monthly SIP & XIRR wealth accumulation calculator.
+   - Daily return correlation matrix and Portfolio Diversification Score.
+   - Debt credit quality distribution and duration sensitivity.
+3. **UI Modals & Visual Components (`src/components/`)**:
+   - `FundSearchModal.tsx`: Search across all categories, filters by AMC and asset class, instant Add/Remove.
+   - `FundFactsheetModal.tsx`: Manager dossiers, fund objectives, factsheet stats.
+   - `DataExportModal.tsx`: Comprehensive CSV, JSON, and raw time-series download.
+   - `QuantVisuals.tsx`: Upgraded charts (420px+ viewports), Capture Ratio Quadrant, Correlation Matrix, Rolling Box Plots.
+4. **App Integration & Layout Alignment (`src/App.tsx`)**:
+   - Full-width aligned canvas (`max-w-[1720px] mx-auto`), responsive tabs, active compare chips with remove buttons.
+5. **Python Suite Sync**:
+   - Update `data_loader.py`, `quant_engine.py`, `overlap_engine.py`, `stress_test.py`, `app.py`, and `requirements.txt`.
+6. **Verification**:
+   - Co-execute `compile_applet` and `lint_applet` to ensure zero compilation or lint errors.
+   - Verify responsive behavior and accurate 5Y rolling hit-rate calculations.
