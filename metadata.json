@@ -1,0 +1,6 @@
+{
+  "name": "Indian Mutual Funds Quantitative & Risk Analytics",
+  "description": "Production-grade institutional analytics platform for Indian Mutual Funds featuring rolling returns, risk-adjusted ratios, ISIN overlap, liquidity stress testing, duration shock models, and exportable Python Streamlit suite.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
