@@ -241,18 +241,18 @@ export default function App() {
     }
   };
 
-  // Trailing CAGRs
+  // Trailing Returns (3M, 6M, 1Y, 3Y, 5Y, 7Y, 10Y)
   const trailingCagrMap = useMemo(() => {
     const map: Record<number, Record<string, number | undefined>> = {};
     selectedCodes.forEach((code) => {
       const s = fundSeriesMap[code] || [];
-      map[code] = computeTrailingCagr(s, [1, 3, 5, 7, 10]);
+      map[code] = computeTrailingCagr(s, [0.25, 0.5, 1, 3, 5, 7, 10]);
     });
     return map;
   }, [selectedCodes, fundSeriesMap]);
 
   const benchmarkCagr = useMemo(() => {
-    return computeTrailingCagr(benchmarkSeries, [1, 3, 5, 7, 10]);
+    return computeTrailingCagr(benchmarkSeries, [0.25, 0.5, 1, 3, 5, 7, 10]);
   }, [benchmarkSeries]);
 
   // Rolling Return Distributions & Hit Rates
@@ -371,15 +371,27 @@ export default function App() {
     };
   }, [targetStressFund, customRateShockBps]);
 
-  // Named series for line chart
-  const namedPerfMap = useMemo(() => {
-    const res: Record<string, NavPoint[]> = {};
+  // Named and sliced series for cumulative performance chart according to timeHorizon
+  const slicedPerfData = useMemo(() => {
+    const targetDays = timeHorizon * 365.25;
+    const now = new Date();
+    const cutoffDate = new Date(now.getTime() - targetDays * 86400000).toISOString().split('T')[0];
+
+    const slicedBench = benchmarkSeries.filter((p) => p.date >= cutoffDate);
+    const slicedMap: Record<string, NavPoint[]> = {};
+
     selectedCodes.forEach((code) => {
       const name = allFunds[code]?.name || `Scheme ${code}`;
-      res[name] = fundSeriesMap[code] || [];
+      const series = fundSeriesMap[code] || [];
+      const filtered = series.filter((p) => p.date >= cutoffDate);
+      slicedMap[name] = filtered.length > 0 ? filtered : series;
     });
-    return res;
-  }, [selectedCodes, allFunds, fundSeriesMap]);
+
+    return {
+      bench: slicedBench.length > 0 ? slicedBench : benchmarkSeries,
+      funds: slicedMap,
+    };
+  }, [selectedCodes, allFunds, fundSeriesMap, benchmarkSeries, timeHorizon]);
 
   return (
     <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col font-sans selection:bg-indigo-900 selection:text-white">
@@ -565,20 +577,53 @@ export default function App() {
           <div>
             <div className="flex items-center justify-between text-xs text-slate-300 mb-1.5">
               <span className="font-bold uppercase tracking-wider">Analysis Horizon</span>
-              <span className="font-mono text-emerald-400 font-semibold">{timeHorizon} Years</span>
+              <span className="font-mono text-emerald-400 font-semibold">
+                {timeHorizon === 0.25
+                  ? '3 Months'
+                  : timeHorizon === 0.5
+                  ? '6 Months'
+                  : timeHorizon >= 12
+                  ? 'Max (12Y)'
+                  : `${timeHorizon} Years`}
+              </span>
             </div>
+            {/* Horizon Select Dropdown */}
+            <select
+              value={timeHorizon}
+              onChange={(e) => setTimeHorizon(parseFloat(e.target.value))}
+              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 mb-2 font-mono"
+            >
+              <option value={0.25}>3 Months (0.25 Year)</option>
+              <option value={0.5}>6 Months (0.50 Year)</option>
+              <option value={1}>1 Year (Trailing 1Y)</option>
+              <option value={3}>3 Years (Trailing 3Y)</option>
+              <option value={5}>5 Years (Trailing 5Y)</option>
+              <option value={7}>7 Years (Trailing 7Y)</option>
+              <option value={10}>10 Years (Trailing 10Y)</option>
+              <option value={12}>Max History (~12 Years)</option>
+            </select>
+            {/* Quick Horizon Buttons */}
             <div className="grid grid-cols-4 gap-1">
-              {[1, 3, 5, 7].map((yr) => (
+              {[
+                { label: '3M', val: 0.25 },
+                { label: '6M', val: 0.5 },
+                { label: '1Y', val: 1 },
+                { label: '3Y', val: 3 },
+                { label: '5Y', val: 5 },
+                { label: '7Y', val: 7 },
+                { label: '10Y', val: 10 },
+                { label: 'Max', val: 12 },
+              ].map((item) => (
                 <button
-                  key={yr}
-                  onClick={() => setTimeHorizon(yr)}
+                  key={item.label}
+                  onClick={() => setTimeHorizon(item.val)}
                   className={`py-1 text-xs rounded-lg font-mono transition-colors ${
-                    timeHorizon === yr
-                      ? 'bg-indigo-600 text-white font-bold'
+                    timeHorizon === item.val
+                      ? 'bg-indigo-600 text-white font-bold shadow-xs'
                       : 'bg-slate-900 text-slate-400 hover:bg-slate-800'
                   }`}
                 >
-                  {yr}Y
+                  {item.label}
                 </button>
               ))}
             </div>
@@ -654,25 +699,32 @@ export default function App() {
                 </div>
 
                 <PerformanceChart
-                  seriesMap={namedPerfMap}
-                  benchSeries={benchmarkSeries}
+                  seriesMap={slicedPerfData.funds}
+                  benchSeries={slicedPerfData.bench}
                   benchName={activeBenchmark.name}
                   colors={COLOR_PALETTE}
                 />
               </div>
 
-              {/* Trailing CAGR Table & Rolling Hit Rates */}
+              {/* Trailing Returns Table & Rolling Hit Rates */}
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                {/* Trailing CAGR Table */}
+                {/* Trailing Returns Table */}
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
-                  <h3 className="text-sm font-bold text-white mb-1">Trailing CAGR (%) Matrix</h3>
-                  <p className="text-xs text-slate-400 mb-3">Annualized point-to-point compound annual growth rates.</p>
+                  <div className="flex items-center justify-between mb-1">
+                    <h3 className="text-sm font-bold text-white">Trailing Returns &amp; CAGR (%) Matrix</h3>
+                    <span className="text-[10px] text-indigo-400 font-mono bg-indigo-950/60 border border-indigo-800/60 px-2 py-0.5 rounded">
+                      Sub-annual &amp; Multi-year
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mb-3">Absolute returns for &lt;1Y; annualized CAGR for ≥1Y.</p>
 
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs font-mono text-right">
                       <thead>
                         <tr className="border-b border-slate-800 text-slate-400 font-sans">
                           <th className="py-2.5 text-left font-medium">Scheme / Benchmark</th>
+                          <th className="py-2.5 px-2 font-medium" title="3-Month Absolute Return">3M*</th>
+                          <th className="py-2.5 px-2 font-medium" title="6-Month Absolute Return">6M*</th>
                           <th className="py-2.5 px-2 font-medium">1Y</th>
                           <th className="py-2.5 px-2 font-medium">3Y</th>
                           <th className="py-2.5 px-2 font-medium">5Y</th>
@@ -683,16 +735,26 @@ export default function App() {
                       <tbody className="divide-y divide-slate-800/60">
                         {activeFundsList.map((fund) => {
                           const cagr = trailingCagrMap[fund.scheme_code] || {};
+                          const renderCell = (val: number | undefined) => {
+                            if (val === undefined) return <span className="text-slate-500 font-normal">N/A</span>;
+                            return (
+                              <span className={val >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                                {val > 0 ? `+${val.toFixed(2)}` : val.toFixed(2)}%
+                              </span>
+                            );
+                          };
                           return (
                             <tr key={fund.scheme_code} className="hover:bg-slate-800/40">
                               <td className="py-2.5 text-left font-sans text-slate-200 font-medium truncate max-w-[180px]">
                                 {fund.name}
                               </td>
-                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{cagr['1Y'] ?? '-'}%</td>
-                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{cagr['3Y'] ?? '-'}%</td>
-                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{cagr['5Y'] ?? '-'}%</td>
-                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{cagr['7Y'] ?? '-'}%</td>
-                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{cagr['10Y'] ?? '-'}%</td>
+                              <td className="py-2.5 px-2">{renderCell(cagr['3M'])}</td>
+                              <td className="py-2.5 px-2">{renderCell(cagr['6M'])}</td>
+                              <td className="py-2.5 px-2">{renderCell(cagr['1Y'])}</td>
+                              <td className="py-2.5 px-2">{renderCell(cagr['3Y'])}</td>
+                              <td className="py-2.5 px-2">{renderCell(cagr['5Y'])}</td>
+                              <td className="py-2.5 px-2">{renderCell(cagr['7Y'])}</td>
+                              <td className="py-2.5 px-2">{renderCell(cagr['10Y'])}</td>
                             </tr>
                           );
                         })}
@@ -700,14 +762,33 @@ export default function App() {
                           <td className="py-2.5 text-left font-sans text-amber-300">
                             {activeBenchmark.name} (Bench)
                           </td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">{benchmarkCagr['1Y'] ?? '-'}%</td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">{benchmarkCagr['3Y'] ?? '-'}%</td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">{benchmarkCagr['5Y'] ?? '-'}%</td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">{benchmarkCagr['7Y'] ?? '-'}%</td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">{benchmarkCagr['10Y'] ?? '-'}%</td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">
+                            {benchmarkCagr['3M'] !== undefined ? `${benchmarkCagr['3M'] > 0 ? '+' : ''}${benchmarkCagr['3M'].toFixed(2)}%` : 'N/A'}
+                          </td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">
+                            {benchmarkCagr['6M'] !== undefined ? `${benchmarkCagr['6M'] > 0 ? '+' : ''}${benchmarkCagr['6M'].toFixed(2)}%` : 'N/A'}
+                          </td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">
+                            {benchmarkCagr['1Y'] !== undefined ? `${benchmarkCagr['1Y'] > 0 ? '+' : ''}${benchmarkCagr['1Y'].toFixed(2)}%` : 'N/A'}
+                          </td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">
+                            {benchmarkCagr['3Y'] !== undefined ? `${benchmarkCagr['3Y'] > 0 ? '+' : ''}${benchmarkCagr['3Y'].toFixed(2)}%` : 'N/A'}
+                          </td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">
+                            {benchmarkCagr['5Y'] !== undefined ? `${benchmarkCagr['5Y'] > 0 ? '+' : ''}${benchmarkCagr['5Y'].toFixed(2)}%` : 'N/A'}
+                          </td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">
+                            {benchmarkCagr['7Y'] !== undefined ? `${benchmarkCagr['7Y'] > 0 ? '+' : ''}${benchmarkCagr['7Y'].toFixed(2)}%` : 'N/A'}
+                          </td>
+                          <td className="py-2.5 px-2 text-amber-300 font-bold">
+                            {benchmarkCagr['10Y'] !== undefined ? `${benchmarkCagr['10Y'] > 0 ? '+' : ''}${benchmarkCagr['10Y'].toFixed(2)}%` : 'N/A'}
+                          </td>
                         </tr>
                       </tbody>
                     </table>
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-2">
+                    *3M &amp; 6M are absolute cumulative returns; ≥1Y periods are annualized compound rates (CAGR). N/A denotes fund age is shorter than period.
                   </div>
                 </div>
 
@@ -719,30 +800,19 @@ export default function App() {
                         {rollingWindowYears}Y Rolling Benchmark Hit Rate (%)
                       </h3>
                       <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg text-xs font-mono">
-                        <button
-                          onClick={() => setRollingWindowYears(1)}
-                          className={`px-2 py-0.5 rounded ${
-                            rollingWindowYears === 1 ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400'
-                          }`}
-                        >
-                          1Y
-                        </button>
-                        <button
-                          onClick={() => setRollingWindowYears(3)}
-                          className={`px-2 py-0.5 rounded ${
-                            rollingWindowYears === 3 ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400'
-                          }`}
-                        >
-                          3Y
-                        </button>
-                        <button
-                          onClick={() => setRollingWindowYears(5)}
-                          className={`px-2 py-0.5 rounded ${
-                            rollingWindowYears === 5 ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400'
-                          }`}
-                        >
-                          5Y
-                        </button>
+                        {[1, 3, 5, 7].map((yr) => (
+                          <button
+                            key={yr}
+                            onClick={() => setRollingWindowYears(yr)}
+                            className={`px-2 py-0.5 rounded transition-colors ${
+                              rollingWindowYears === yr
+                                ? 'bg-indigo-600 text-white font-bold shadow-xs'
+                                : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {yr}Y
+                          </button>
+                        ))}
                       </div>
                     </div>
                     <p className="text-xs text-slate-400 mb-4">
@@ -752,22 +822,29 @@ export default function App() {
                     <div className="space-y-3.5">
                       {rollingAnalysis.fundsRolling.map((fund) => {
                         const hit = fund.hitRate;
+                        const isAvailable = hit !== undefined && fund.dist.count > 0;
                         return (
                           <div key={fund.code} className="space-y-1">
                             <div className="flex items-center justify-between text-xs">
                               <span className="text-slate-300 font-medium truncate max-w-[240px]">
                                 {fund.name}
                               </span>
-                              <span className="font-mono font-bold text-emerald-400">{hit.toFixed(1)}%</span>
+                              <span className="font-mono font-bold text-emerald-400">
+                                {isAvailable ? `${hit.toFixed(1)}%` : <span className="text-slate-500 font-normal">N/A (insufficient data)</span>}
+                              </span>
                             </div>
                             <div className="w-full bg-slate-800 rounded-full h-2.5 overflow-hidden">
-                              <div
-                                className="h-full rounded-full transition-all duration-500"
-                                style={{
-                                  width: `${Math.min(100, Math.max(0, hit))}%`,
-                                  backgroundColor: hit > 70 ? '#10b981' : hit > 50 ? '#38bdf8' : '#fb923c',
-                                }}
-                              />
+                              {isAvailable ? (
+                                <div
+                                  className="h-full rounded-full transition-all duration-500"
+                                  style={{
+                                    width: `${Math.min(100, Math.max(0, hit))}%`,
+                                    backgroundColor: hit > 70 ? '#10b981' : hit > 50 ? '#38bdf8' : '#fb923c',
+                                  }}
+                                />
+                              ) : (
+                                <div className="h-full bg-slate-700/40 w-full" />
+                              )}
                             </div>
                           </div>
                         );
@@ -815,14 +892,22 @@ export default function App() {
                           <td className="py-2.5 text-left font-sans text-slate-200 font-medium truncate max-w-[180px]">
                             {f.name}
                           </td>
-                          <td className="py-2.5 px-2 text-emerald-400 font-bold">{f.dist.mean.toFixed(2)}%</td>
-                          <td className="py-2.5 px-2 text-white font-bold">{f.dist.median.toFixed(2)}%</td>
-                          <td className="py-2.5 px-2 text-rose-400">{f.dist.min.toFixed(2)}%</td>
-                          <td className="py-2.5 px-2 text-sky-400 font-bold">{f.dist.max.toFixed(2)}%</td>
-                          <td className="py-2.5 px-2 text-slate-300">{f.dist.q25.toFixed(2)}%</td>
-                          <td className="py-2.5 px-2 text-slate-300">{f.dist.q75.toFixed(2)}%</td>
-                          <td className="py-2.5 px-2 text-slate-400">{f.dist.std.toFixed(2)}%</td>
-                          <td className="py-2.5 px-2 text-emerald-400 font-bold">{f.dist.pctPositive.toFixed(1)}%</td>
+                          {f.dist.count > 0 ? (
+                            <>
+                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{f.dist.mean.toFixed(2)}%</td>
+                              <td className="py-2.5 px-2 text-white font-bold">{f.dist.median.toFixed(2)}%</td>
+                              <td className="py-2.5 px-2 text-rose-400">{f.dist.min.toFixed(2)}%</td>
+                              <td className="py-2.5 px-2 text-sky-400 font-bold">{f.dist.max.toFixed(2)}%</td>
+                              <td className="py-2.5 px-2 text-slate-300">{f.dist.q25.toFixed(2)}%</td>
+                              <td className="py-2.5 px-2 text-slate-300">{f.dist.q75.toFixed(2)}%</td>
+                              <td className="py-2.5 px-2 text-slate-400">{f.dist.std.toFixed(2)}%</td>
+                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{f.dist.pctPositive.toFixed(1)}%</td>
+                            </>
+                          ) : (
+                            <td colSpan={8} className="py-2.5 px-2 text-center text-slate-500 font-sans italic">
+                              N/A (Fund history is shorter than {rollingWindowYears} years)
+                            </td>
+                          )}
                         </tr>
                       ))}
                       <tr className="bg-amber-950/20 font-semibold border-t border-slate-700">

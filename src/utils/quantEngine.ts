@@ -12,10 +12,11 @@ import {
 
 /**
  * Annualized CAGR for specific periods: (P_end / P_start) ** (1 / years) - 1
+ * Supports sub-annual periods (3M = 0.25Y, 6M = 0.5Y, 1Y, 3Y, 5Y, 7Y, 10Y)
  */
 export function computeTrailingCagr(
   series: NavPoint[],
-  periods: number[] = [1, 3, 5, 7, 10]
+  periods: number[] = [0.25, 0.5, 1, 3, 5, 7, 10]
 ): TrailingCagr {
   const result: TrailingCagr = {};
   if (!series || series.length < 10) return result;
@@ -23,10 +24,20 @@ export function computeTrailingCagr(
   const sorted = [...series].sort((a, b) => a.date.localeCompare(b.date));
   const endPoint = sorted[sorted.length - 1];
   const endDate = new Date(endPoint.date);
+  const totalDaysAvailable = (endDate.getTime() - new Date(sorted[0].date).getTime()) / 86400000;
 
   for (const yrs of periods) {
-    const targetDate = new Date(endDate);
-    targetDate.setFullYear(targetDate.getFullYear() - yrs);
+    const label =
+      yrs === 0.25 ? '3M' : yrs === 0.5 ? '6M' : `${yrs}Y`;
+
+    const targetDays = yrs * 365.25;
+    if (totalDaysAvailable < targetDays * 0.85) {
+      // Fund does not have enough history for this period -> N/A
+      result[label] = undefined;
+      continue;
+    }
+
+    const targetDate = new Date(endDate.getTime() - targetDays * 86400000);
     const targetIso = targetDate.toISOString().split('T')[0];
 
     let startPoint: NavPoint | undefined;
@@ -38,24 +49,17 @@ export function computeTrailingCagr(
     }
 
     if (startPoint && startPoint.nav > 0 && endPoint.nav > 0) {
-      const cagr = Math.pow(endPoint.nav / startPoint.nav, 1.0 / yrs) - 1.0;
-      if (yrs === 1) result['1Y'] = Number((cagr * 100).toFixed(2));
-      if (yrs === 3) result['3Y'] = Number((cagr * 100).toFixed(2));
-      if (yrs === 5) result['5Y'] = Number((cagr * 100).toFixed(2));
-      if (yrs === 7) result['7Y'] = Number((cagr * 100).toFixed(2));
-      if (yrs === 10) result['10Y'] = Number((cagr * 100).toFixed(2));
-    } else {
-      const firstPoint = sorted[0];
-      const days = (endDate.getTime() - new Date(firstPoint.date).getTime()) / 86400000;
-      if (days >= 300) {
-        const actualYrs = days / 365.25;
-        const cagr = Math.pow(endPoint.nav / firstPoint.nav, 1.0 / actualYrs) - 1.0;
-        if (yrs === 1 && !result['1Y']) result['1Y'] = Number((cagr * 100).toFixed(2));
-        if (yrs === 3 && actualYrs >= 2) result['3Y'] = Number((cagr * 100).toFixed(2));
-        if (yrs === 5 && actualYrs >= 4) result['5Y'] = Number((cagr * 100).toFixed(2));
-        if (yrs === 7 && actualYrs >= 6) result['7Y'] = Number((cagr * 100).toFixed(2));
-        if (yrs === 10 && actualYrs >= 8) result['10Y'] = Number((cagr * 100).toFixed(2));
+      if (yrs < 1.0) {
+        // Absolute return for sub-annual periods (3M, 6M)
+        const absReturn = (endPoint.nav - startPoint.nav) / startPoint.nav;
+        result[label] = Number((absReturn * 100).toFixed(2));
+      } else {
+        // Annualized CAGR for >= 1 year
+        const cagr = Math.pow(endPoint.nav / startPoint.nav, 1.0 / yrs) - 1.0;
+        result[label] = Number((cagr * 100).toFixed(2));
       }
+    } else {
+      result[label] = undefined;
     }
   }
 
@@ -63,8 +67,7 @@ export function computeTrailingCagr(
 }
 
 /**
- * Full Rolling Returns Distribution (1Y, 3Y, 5Y)
- * Computes Mean, Median, Min, Max, Q25, Q75, Std, % Positive, % Negative
+ * Full Rolling Returns Distribution (1Y, 3Y, 5Y, etc.)
  */
 export function computeRollingReturns(
   series: NavPoint[],
@@ -143,8 +146,8 @@ export function computeRollingReturns(
 export function computeBenchmarkHitRate(
   fundRolling: { date: string; value: number }[],
   benchRolling: { date: string; value: number }[]
-): number {
-  if (!fundRolling.length || !benchRolling.length) return 0;
+): number | undefined {
+  if (!fundRolling.length || !benchRolling.length) return undefined;
 
   const benchMap = new Map(benchRolling.map((p) => [p.date, p.value]));
   let matched = 0;
@@ -160,7 +163,7 @@ export function computeBenchmarkHitRate(
     }
   }
 
-  if (matched === 0) return 0;
+  if (matched === 0) return undefined;
   return Number(((beatCount / matched) * 100).toFixed(1));
 }
 
@@ -212,7 +215,7 @@ export function computeComprehensiveMetrics(
     }
   }
 
-  if (aligned.length < 30) return empty;
+  if (aligned.length < 20) return empty;
 
   const fReturns: number[] = [];
   const bReturns: number[] = [];
@@ -311,7 +314,7 @@ export function computeComprehensiveMetrics(
 
   const calmarRatio = Math.abs(maxDd) > 1e-4 ? fAnnReturn / Math.abs(maxDd) : 0;
 
-  // Upside / Downside Capture Ratio
+  // Upside / Downside Capture
   let upFundSum = 0, upBenchSum = 0;
   let downFundSum = 0, downBenchSum = 0;
   for (let i = 0; i < n; i++) {
@@ -395,7 +398,7 @@ export function simulateMonthlySip(
 
   let lastMonth = '';
   for (const point of subSeries) {
-    const ym = point.date.slice(0, 7); // YYYY-MM
+    const ym = point.date.slice(0, 7);
     if (ym !== lastMonth) {
       lastMonth = ym;
       const unitsBought = monthlyAmount / point.nav;
@@ -424,7 +427,6 @@ export function simulateMonthlySip(
     date: new Date(subSeries[subSeries.length - 1].date),
   });
 
-  // Calculate XIRR via Newton-Raphson approximation
   let xirr = 0.12;
   const firstDate = cashFlows[0]?.date.getTime() || 0;
   for (let iter = 0; iter < 25; iter++) {
@@ -465,7 +467,6 @@ export function computeReturnCorrelationMatrix(
     return { codes, names: codes.map((c) => fundNames[c] || `Scheme ${c}`), matrix: [[1.0]], diversificationScore: 0 };
   }
 
-  // Find common date intersection
   const dateSets = codes.map((c) => new Set(seriesMap[c].map((p) => p.date)));
   const commonDates: string[] = [];
   const firstSet = dateSets[0];
@@ -482,7 +483,6 @@ export function computeReturnCorrelationMatrix(
     return { codes, names, matrix: eye, diversificationScore: 20 };
   }
 
-  // Calculate daily returns for each code
   const returnsByCode: Record<number, number[]> = {};
   codes.forEach((c) => {
     const map = new Map(seriesMap[c].map((p) => [p.date, p.nav]));
@@ -528,7 +528,6 @@ export function computeReturnCorrelationMatrix(
   }
 
   const avgCorr = offDiagCount > 0 ? offDiagSum / offDiagCount : 1.0;
-  // Lower correlation = Higher Diversification Score (0 to 100)
   const diversificationScore = Math.max(0, Math.min(100, Math.round((1.0 - avgCorr) * 100)));
 
   return {
