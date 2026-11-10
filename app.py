@@ -22,6 +22,7 @@ from data_loader import (
     fetch_fund_nav_mfapi,
     fetch_benchmark_series,
     get_aligned_fund_and_benchmark,
+    search_mfapi_schemes,
 )
 from quant_engine import (
     compute_trailing_cagr,
@@ -78,8 +79,25 @@ def main():
         default=[l for l in default_selected if l in fund_options]
     )
     
-    custom_code = st.sidebar.text_input("Add Custom Scheme Code (mfapi.in)", placeholder="e.g. 120503")
     selected_codes = [fund_options[l] for l in selected_labels]
+
+    # Live Search across all 38,000+ mutual fund schemes from mfapi.in
+    st.sidebar.markdown("**Universal MF Search (mfapi.in)**")
+    search_q = st.sidebar.text_input("Search 38,000+ Schemes by Name", placeholder="e.g. Mirae, SBI Small, Quant, Gold", key="mfapi_search_box")
+    if search_q.strip() and len(search_q.strip()) >= 2:
+        results = search_mfapi_schemes(search_q.strip())
+        if results:
+            options_map = {f"{r['schemeName']} ({r['schemeCode']})": str(r['schemeCode']) for r in results[:25]}
+            chosen = st.sidebar.selectbox("Matching Schemes from mfapi.in:", ["-- Click to add --"] + list(options_map.keys()))
+            if chosen != "-- Click to add --":
+                chosen_code = options_map[chosen]
+                if chosen_code not in selected_codes:
+                    selected_codes.append(chosen_code)
+                    st.sidebar.success(f"Added {chosen} to comparison!")
+        else:
+            st.sidebar.info("No schemes found on mfapi.in matching query.")
+
+    custom_code = st.sidebar.text_input("Or Enter Direct Scheme Code", placeholder="e.g. 120503")
     if custom_code.strip() and custom_code.strip().isdigit():
         c_code = custom_code.strip()
         if c_code not in selected_codes:

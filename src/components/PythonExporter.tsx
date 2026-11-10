@@ -53,6 +53,32 @@ BENCHMARK_SYMBOLS = {
 }
 
 @cache_decorator
+def search_mfapi_schemes(query: str):
+    """Search mutual fund schemes by name using api.mfapi.in/mf/search."""
+    if not query or len(query.strip()) < 2:
+        return []
+    url = f"https://api.mfapi.in/mf/search?q={requests.utils.quote(query.strip())}"
+    try:
+        resp = requests.get(url, timeout=8)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        logger.warning(f"mfapi search failed: {e}")
+    return []
+
+@cache_decorator
+def fetch_mfapi_catalog(limit: int = 50, offset: int = 0):
+    """List mutual fund schemes with pagination from api.mfapi.in/mf."""
+    url = f"https://api.mfapi.in/mf?limit={limit}&offset={offset}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        logger.warning(f"mfapi catalog failed: {e}")
+    return []
+
+@cache_decorator
 def fetch_fund_nav_mfapi(scheme_code: int or str) -> pd.DataFrame:
     code_str = str(scheme_code).strip()
     url = f"https://api.mfapi.in/mf/{code_str}"

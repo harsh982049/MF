@@ -551,8 +551,7 @@ export async function fetchLiveMfNav(schemeCode: number): Promise<NavPoint[]> {
               .filter((p: NavPoint | null): p is NavPoint => p !== null && !isNaN(p.nav))
               .sort((a: NavPoint, b: NavPoint) => a.date.localeCompare(b.date));
 
-            // If history is longer than 5 years, return it directly
-            if (formatted.length > 500) {
+            if (formatted.length > 0) {
               return formatted;
             }
           }

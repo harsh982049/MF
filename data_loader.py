@@ -153,6 +153,47 @@ BENCHMARK_SYMBOLS = {
 
 
 @cache_decorator
+def search_mfapi_schemes(query: str) -> List[Dict[str, Any]]:
+    """Search for mutual fund schemes by name using https://api.mfapi.in/mf/search."""
+    if not query or len(query.strip()) < 2:
+        return []
+    url = f"https://api.mfapi.in/mf/search?q={requests.utils.quote(query.strip())}"
+    try:
+        resp = requests.get(url, timeout=8)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        logger.warning(f"mfapi search failed for query '{query}': {e}")
+    return []
+
+
+@cache_decorator
+def fetch_mfapi_catalog(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    """List mutual fund schemes with pagination from https://api.mfapi.in/mf."""
+    url = f"https://api.mfapi.in/mf?limit={limit}&offset={offset}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        logger.warning(f"mfapi catalog fetch failed: {e}")
+    return []
+
+
+@cache_decorator
+def fetch_mfapi_latest(scheme_code: int or str) -> Dict[str, Any]:
+    """Get latest NAV and scheme metadata from https://api.mfapi.in/mf/{scheme_code}/latest."""
+    url = f"https://api.mfapi.in/mf/{scheme_code}/latest"
+    try:
+        resp = requests.get(url, timeout=8)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        logger.warning(f"mfapi latest fetch failed for scheme {scheme_code}: {e}")
+    return {}
+
+
+@cache_decorator
 def fetch_fund_nav_mfapi(scheme_code: int or str) -> pd.DataFrame:
     """Fetch historical daily NAVs dynamically from https://api.mfapi.in/mf/{scheme_code}."""
     code_str = str(scheme_code).strip()
@@ -170,7 +211,7 @@ def fetch_fund_nav_mfapi(scheme_code: int or str) -> pd.DataFrame:
                 df = df.dropna(subset=["date", "nav"]).sort_values("date").reset_index(drop=True)
                 df["scheme_code"] = int(code_str)
                 df = df.drop_duplicates(subset=["date"])
-                if len(df) > 300:
+                if len(df) > 0:
                     return df[["scheme_code", "date", "nav"]]
     except Exception as e:
         logger.warning(f"Live fetch failed for scheme {scheme_code}: {e}")

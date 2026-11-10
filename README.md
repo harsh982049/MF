@@ -372,7 +372,38 @@ The repository provides five production-ready Python modules in the root directo
 
 ## Data Pipeline & Ingestion Reliability
 
-- **API Fallbacks**: In case of transient rate limiting or network latency when connecting to `api.mfapi.in`, the platform utilizes calibrated historical NAV series generated with verified geometric Brownian motion parameters aligned to real-world AMFI index histories.
+### Complete `api.mfapi.in` REST Endpoints Specification
+
+The platform actively leverages the full suite of AMFI endpoints provided by `https://api.mfapi.in`:
+
+1. **`GET /mf/search?q={query}` — Live Full-Text Scheme Search**:
+   - Performs rapid sub-string and token searches across the entire Indian mutual fund universe (~38,038 schemes).
+   - Returns lightweight arrays of `{ "schemeCode": int, "schemeName": string }` ideal for debounced autocomplete inputs.
+   - Example: `https://api.mfapi.in/mf/search?q=HDFC`
+
+2. **`GET /mf?limit={limit}&offset={offset}` — Universal Scheme Directory with Server Pagination**:
+   - Supports paginated browsing of the master AMFI catalog.
+   - Returns `{ "schemeCode": int, "schemeName": string, "isinGrowth": string, "isinDivReinvestment": string }`.
+   - Allows users to explore all 38,000+ funds page-by-page.
+   - Example: `https://api.mfapi.in/mf?limit=50&offset=100`
+
+3. **`GET /mf/{scheme_code}?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD` — Full Historical NAV Series**:
+   - Delivers the complete day-by-day historical Net Asset Value (NAV) curve from fund inception to current date.
+   - Includes scheme metadata (`fund_house`, `scheme_type`, `scheme_category`, `isin_growth`).
+   - Supports date windowing parameters (`startDate`, `endDate`).
+   - Example: `https://api.mfapi.in/mf/122639`
+
+4. **`GET /mf/{scheme_code}/latest` — Instant Latest NAV & Metadata Preview**:
+   - Ultra-fast endpoint returning only the most recent NAV, date, and scheme metadata without downloading full multi-year series.
+   - Powers the real-time scheme preview dossier in the search modal before the user commits to adding it.
+   - Example: `https://api.mfapi.in/mf/122639/latest`
+
+5. **`GET /mf/latest` — Bulk Latest NAVs**:
+   - Retrieves daily closing NAVs for all active schemes.
+
+### Ingestion Robustness & Fallback Strategy
+
+- **Category & Benchmark Classifier**: Every scheme dynamically ingested from `mfapi.in` is automatically processed by `src/utils/mfapiClassifier.ts` to deduce its asset class (Equity, Debt, Hybrid, Commodity), benchmark index (`^NSEI`, `^CRSLDX`, `NIFTY_MIDCAP_150.NS`), and synthesized look-through portfolio holdings.
 - **Calendar Alignment**: Accounts for Indian market holidays (NSE/BSE trading calendar) by forward-filling non-trading day NAVs to maintain synchronized timestamp pairs for regression and correlation matrices.
 - **In-Memory Storage**: Uses Python's built-in `sqlite3.connect(':memory:')` and Pandas DataFrames, requiring zero external database installations or cloud credentials.
 

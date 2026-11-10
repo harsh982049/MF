@@ -58,6 +58,7 @@ import { FundSearchModal } from './components/FundSearchModal';
 import { FundFactsheetModal } from './components/FundFactsheetModal';
 import { DataExportModal } from './components/DataExportModal';
 import { PythonExporter } from './components/PythonExporter';
+import { classifyAndBuildFundMeta } from './utils/mfapiClassifier';
 
 const COLOR_PALETTE = [
   '#38bdf8', // Sky
@@ -171,67 +172,37 @@ export default function App() {
         const resp = await fetch(`https://api.mfapi.in/mf/${code}`);
         if (resp.ok) {
           const json = await resp.json();
-          const meta = json.meta;
-          const newFund: FundMeta = {
-            scheme_code: code,
-            name: meta.scheme_name || `Scheme ${code}`,
-            category: meta.scheme_category || 'Equity Fund',
-            asset_class: meta.scheme_category?.toLowerCase().includes('debt') ? 'Debt' : 'Equity',
-            fund_house: meta.fund_house || 'Indian Mutual Fund',
-            benchmark_symbol: benchmarkSymbol,
-            isin: meta.isin_growth || `INF${code}`,
-            aum_cr: 12500,
-            inception_date: '2015-01-01',
-            expense_ratio_direct: 0.65,
-            expense_ratio_regular: 1.45,
-            turnover_ratio_pct: 25.0,
-            riskometer: 'Very High',
-            exit_load: '1% if redeemed within 1 year; Nil thereafter.',
-            min_sip_inr: 500,
-            min_lumpsum_inr: 1000,
-            investment_objective: 'To provide long-term capital growth through investments in a diversified portfolio.',
-            manager: {
-              name: 'Appointed Portfolio Manager',
-              tenureYears: 4.0,
-              overallExpYears: 16,
-              education: 'Post Graduate (Finance), CA / CFA',
-              bio: 'Experienced fund manager tracking quantitative capital allocation and portfolio construction.',
-              otherFundsManaged: [],
-            },
-            holdings: PRESET_FUNDS[118989].holdings,
-          };
+          const meta = json.meta || { scheme_code: code, scheme_name: `Scheme ${code}` };
+          const latestNav = json.data && json.data[0] ? parseFloat(json.data[0].nav) : undefined;
+          const newFund = classifyAndBuildFundMeta(meta, latestNav);
           setCustomFunds((prev) => ({ ...prev, [code]: newFund }));
+
+          // Instantly cache series if returned in response
+          if (json.data && Array.isArray(json.data) && json.data.length > 0) {
+            const formatted: NavPoint[] = json.data
+              .map((item: { date: string; nav: string }) => {
+                const parts = item.date.split('-');
+                if (parts.length === 3) {
+                  return { date: `${parts[2]}-${parts[1]}-${parts[0]}`, nav: parseFloat(item.nav) };
+                }
+                return null;
+              })
+              .filter((p: NavPoint | null): p is NavPoint => p !== null && !isNaN(p.nav))
+              .sort((a: NavPoint, b: NavPoint) => a.date.localeCompare(b.date));
+
+            if (formatted.length > 0) {
+              setFundSeriesMap((prev) => ({ ...prev, [code]: formatted }));
+            }
+          }
         }
-      } catch {
-        // Fallback
-        const fallbackFund: FundMeta = {
+      } catch (err) {
+        console.warn(`Fallback for scheme ${code}:`, err);
+        const fallbackFund = classifyAndBuildFundMeta({
           scheme_code: code,
-          name: `Custom Scheme ${code}`,
-          category: 'Flexi Cap',
-          asset_class: 'Equity',
-          fund_house: 'Mutual Fund AMC',
-          benchmark_symbol: benchmarkSymbol,
-          isin: `INF${code}`,
-          aum_cr: 10000,
-          inception_date: '2016-01-01',
-          expense_ratio_direct: 0.7,
-          expense_ratio_regular: 1.5,
-          turnover_ratio_pct: 30.0,
-          riskometer: 'Very High',
-          exit_load: '1% within 365 days',
-          min_sip_inr: 500,
-          min_lumpsum_inr: 1000,
-          investment_objective: 'Long-term capital growth.',
-          manager: {
-            name: 'Portfolio Manager',
-            tenureYears: 3.0,
-            overallExpYears: 15,
-            education: 'MBA (Finance)',
-            bio: 'Active investment strategist.',
-            otherFundsManaged: [],
-          },
-          holdings: PRESET_FUNDS[122639].holdings,
-        };
+          scheme_name: `Mutual Fund Scheme ${code}`,
+          fund_house: 'Indian Mutual Fund AMC',
+          scheme_category: 'Flexi Cap Fund',
+        });
         setCustomFunds((prev) => ({ ...prev, [code]: fallbackFund }));
       }
     }
