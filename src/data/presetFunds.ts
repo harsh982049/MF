@@ -1,9 +1,21 @@
-import { FundMeta, NavPoint, OptionType, PlanType, ValidatedNavSeries } from '../types/quant';
 import {
+  CorporateActionRecord,
+  FundMeta,
+  NavPoint,
+  OptionType,
+  PlanType,
+  ValidatedNavSeries,
+} from '../types/quant';
+import {
+  BENCHMARK_REGISTRY,
   BENCHMARKS,
+  computeCanonicalSeriesSha256,
   ExternalBenchmarkInput,
   isNseTradingDay,
   resolveBenchmarkSeries,
+  resolveVerifiedBenchmarkSeries,
+  validateBenchmarkSnapshot,
+  VERIFIED_BENCHMARK_STORE,
 } from './genuineBenchmarks';
 import { getIndiaValuationDateIso, validateRawNavSeries } from '../utils/navValidator';
 import {
@@ -17,7 +29,16 @@ import {
   validateSchemeIdentity,
 } from '../utils/schemeIdentity';
 
-export { BENCHMARKS, isNseTradingDay, resolveBenchmarkSeries };
+export {
+  BENCHMARK_REGISTRY,
+  BENCHMARKS,
+  computeCanonicalSeriesSha256,
+  isNseTradingDay,
+  resolveBenchmarkSeries,
+  resolveVerifiedBenchmarkSeries,
+  validateBenchmarkSnapshot,
+  VERIFIED_BENCHMARK_STORE,
+};
 
 export const DEFAULT_VERIFIED_PRESET_CODES = [122639, 127042, 118778, 119598];
 
@@ -548,6 +569,8 @@ export interface FetchLiveMfOptions {
   maxStaleDays?: number;
   expectedMeta?: FundMeta;
   trustedRegistry?: Record<number, TrustedRegistryEntry>;
+  corporateActions?: CorporateActionRecord[];
+  seriesIsin?: string | null;
 }
 
 function buildErrorSeries(
@@ -676,6 +699,8 @@ export function validateMfapiPayload(
     returnedSchemeCode: providerMeta?.scheme_code != null ? Number(providerMeta.scheme_code) : null,
     returnedSchemeName: providerMeta?.scheme_name ?? null,
     returnedIsin: (providerMeta?.isin_growth || providerMeta?.isin_div_reinvestment || null) ?? null,
+    corporateActions: options.corporateActions,
+    seriesIsin: options.seriesIsin,
   });
 }
 

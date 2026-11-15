@@ -23,6 +23,11 @@ export default defineConfig(() => {
           changeOrigin: true,
           rewrite: (path: string) => path.replace(/^\/api\/mf/, ''),
         },
+        '/api/niftyindices': {
+          target: 'https://www.niftyindices.com',
+          changeOrigin: true,
+          rewrite: (path: string) => path.replace(/^\/api\/niftyindices/, ''),
+        },
       },
     },
   };

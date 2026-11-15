@@ -1,5 +1,7 @@
 import {
   AssetClass,
+  BenchmarkAlignmentSummary,
+  BenchmarkRole,
   CorporateActionBreak,
   DurationSensitivityResult,
   FundHolding,
@@ -293,6 +295,46 @@ export function alignFundAndBenchmarkSeries(
 }
 
 /**
+ * Computes transparent date-alignment diagnostics between fund and benchmark observations.
+ * Keeps legitimate fund NAV dates outside the benchmark calendar intact while showing exact
+ * common comparison window boundaries.
+ */
+export function computeBenchmarkAlignmentSummary(
+  fundSeries: NavPoint[],
+  benchSeries: NavPoint[]
+): BenchmarkAlignmentSummary {
+  const cleanFund = cleanValidSeries(fundSeries);
+  const cleanBench = cleanValidSeries(benchSeries);
+  const aligned = alignFundAndBenchmarkSeries(cleanFund, cleanBench);
+
+  const fundStartDate = cleanFund[0]?.date ?? null;
+  const fundEndDate = cleanFund[cleanFund.length - 1]?.date ?? null;
+  const benchStartDate = cleanBench[0]?.date ?? null;
+  const benchEndDate = cleanBench[cleanBench.length - 1]?.date ?? null;
+  const alignedStartDate = aligned[0]?.date ?? null;
+  const alignedEndDate = aligned[aligned.length - 1]?.date ?? null;
+
+  return {
+    alignedCount: aligned.length,
+    alignedStartDate,
+    alignedEndDate,
+    fundStartDate,
+    fundEndDate,
+    benchStartDate,
+    benchEndDate,
+    fundOnlyDatesCount: Math.max(0, cleanFund.length - aligned.length),
+    benchOnlyDatesCount: Math.max(0, cleanBench.length - aligned.length),
+    exactStartEndAligned: Boolean(
+      aligned.length > 0 &&
+        fundStartDate &&
+        benchStartDate &&
+        alignedStartDate === aligned[0].date &&
+        alignedEndDate === aligned[aligned.length - 1].date
+    ),
+  };
+}
+
+/**
  * Comprehensive Risk & Active Alpha Metrics
  * Decouples fund-only risk metrics from benchmark-relative metrics so a missing benchmark
  * NEVER zeroes out validated fund-only metrics, and unsupported values always emit null.
@@ -305,12 +347,14 @@ export function computeComprehensiveMetrics(
   category: string,
   assetClass: AssetClass,
   rfAnnual: number = 0.065,
-  corporateActionBreaks?: CorporateActionBreak[]
+  corporateActionBreaks?: CorporateActionBreak[],
+  benchmarkMeta?: { symbol?: string | null; role?: BenchmarkRole | null }
 ): RiskMetrics {
   const unavailableReasons: Record<string, string> = {};
   const cleanFund = cleanValidSeries(fundSeries);
   const cleanBench = cleanValidSeries(benchSeries);
   const breaks = corporateActionBreaks ?? detectCorporateActionBreaks(cleanFund);
+  const alignmentSummary = computeBenchmarkAlignmentSummary(cleanFund, cleanBench);
 
   const buildUnavailableAll = (reasonKey: string, reason: string): RiskMetrics => ({
     fundName,
@@ -341,6 +385,9 @@ export function computeComprehensiveMetrics(
     peakDate: null,
     maxDdDate: null,
     recoveryDate: null,
+    benchmarkSymbolApplied: benchmarkMeta?.symbol ?? null,
+    benchmarkRoleApplied: benchmarkMeta?.role ?? null,
+    alignmentSummary,
   });
 
   if (cleanFund.length < 20) {
@@ -605,6 +652,9 @@ export function computeComprehensiveMetrics(
     peakDate,
     maxDdDate,
     recoveryDate,
+    benchmarkSymbolApplied: benchmarkMeta?.symbol ?? null,
+    benchmarkRoleApplied: benchmarkMeta?.role ?? null,
+    alignmentSummary,
   };
 }
 

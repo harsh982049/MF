@@ -2,6 +2,7 @@ import React from 'react';
 import { X, User, Shield, Award, FileText, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { FundMeta } from '../types/quant';
 import { computeHoldingsCoverage } from '../utils/quantEngine';
+import { BENCHMARK_REGISTRY } from '../data/genuineBenchmarks';
 
 interface FundFactsheetModalProps {
   fund: FundMeta | null;
@@ -11,6 +12,7 @@ interface FundFactsheetModalProps {
 
 export const FundFactsheetModal: React.FC<FundFactsheetModalProps> = ({ fund, isOpen, onClose }) => {
   if (!isOpen || !fund) return null;
+  const disclosedBenchmark = BENCHMARK_REGISTRY[fund.benchmark_symbol];
 
   const unavailableText = (reason?: string) => (
     <span className="text-slate-500 font-normal text-xs" title={reason}>
@@ -40,7 +42,14 @@ export const FundFactsheetModal: React.FC<FundFactsheetModalProps> = ({ fund, is
               <span>·</span>
               <span>Plan: <span className="font-mono text-slate-200">{fund.plan} / {fund.option}</span></span>
               <span>·</span>
-              <span>Benchmark Target: <span className="font-semibold text-amber-400">{fund.benchmark_symbol}</span></span>
+              <span>
+                Disclosed Default Benchmark:{' '}
+                <span className="font-semibold text-amber-400">
+                  {disclosedBenchmark
+                    ? `${disclosedBenchmark.name} [${disclosedBenchmark.providerIndexId}]`
+                    : fund.benchmark_symbol}
+                </span>
+              </span>
             </div>
           </div>
 

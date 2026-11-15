@@ -72,6 +72,36 @@ export interface CorporateActionBreak {
   explanation: string;
 }
 
+export interface CorporateActionRecord {
+  actionId: string;
+  schemeCode: number;
+  actionType: 'unit_split' | 'bonus' | 'consolidation';
+  factor: number;
+  effectiveDate: string;
+  preActionIsin: string | null;
+  postActionIsin: string;
+  sourceCircular: string;
+  description: string;
+  verified: boolean;
+}
+
+export interface AppliedCorporateAction {
+  actionId: string;
+  schemeCode: number;
+  actionType: 'unit_split' | 'bonus' | 'consolidation';
+  factor: number;
+  effectiveDate: string;
+  preActionIsin: string | null;
+  postActionIsin: string;
+  sourceCircular: string;
+  affectedObservationCount: number;
+  windowStatus: 'applied' | 'out_of_window' | 'isin_mismatch_skipped';
+  rawPreSplitBoundaryNav?: number | null;
+  rawPostSplitBoundaryNav?: number | null;
+  adjustedPreSplitBoundaryNav?: number | null;
+  adjustedBoundaryReturnPct?: number | null;
+}
+
 export interface RawNavObservation {
   rawDate: string;
   date: string | null;
@@ -114,9 +144,13 @@ export interface NavValidationReport {
   duplicateConflicts: { date: string; values: number[] }[];
   earliestDate: string | null;
   latestDate: string | null;
+  rawEarliestDate?: string | null;
+  rawLatestDate?: string | null;
   isStale: boolean;
   staleDays: number | null;
   corporateActionBreaks: CorporateActionBreak[];
+  appliedCorporateActions?: AppliedCorporateAction[];
+  adjustedApplied?: boolean;
   quarantinedFromBreak: boolean;
   unavailableReason: string | null;
   warnings: string[];
@@ -126,6 +160,9 @@ export interface NavValidationReport {
 export interface ValidatedNavSeries {
   schemeCode: number;
   points: NavPoint[];
+  rawPoints?: NavPoint[];
+  adjustedPoints?: NavPoint[];
+  appliedActionIds?: string[];
   rawObservations: RawNavObservation[];
   validation: NavValidationReport;
   identity: SchemeIdentityAudit | null;
@@ -216,15 +253,90 @@ export interface NavPoint {
   nav: number;
 }
 
+export type BenchmarkRole = 'scheme_default' | 'common_comparator';
+export type BenchmarkReturnVariant = 'TRI' | 'PRI' | 'Index' | 'Unavailable';
+
+export interface BenchmarkCheckpoint {
+  date: string;
+  nav: number;
+  tolerance?: number;
+}
+
+export interface BenchmarkRegistryEntry {
+  symbol: string;
+  providerIndexId: string;
+  providerIndexName: string;
+  name: string;
+  currency: string;
+  returnVariant: BenchmarkReturnVariant;
+  assetClass: AssetClass;
+  supported: boolean;
+  sourceUri: string | null;
+  sourceReportPage?: string | null;
+  effectiveFrom: string | null;
+  effectiveTo: string | null;
+  checkpoints: BenchmarkCheckpoint[];
+}
+
+export interface VerifiedBenchmarkSnapshot {
+  symbol: string;
+  providerIndexId: string;
+  providerIndexName?: string;
+  displayName: string;
+  currency: string;
+  returnVariant: BenchmarkReturnVariant;
+  sourceUri: string;
+  sourceReportPage?: string | null;
+  fetchedAt: string;
+  snapshotVersion: string;
+  coverageStart: string;
+  coverageEnd: string;
+  observationCount?: number;
+  checksumSha256: string;
+  isTestFixture?: boolean;
+  checkpoints?: BenchmarkCheckpoint[];
+  series: NavPoint[];
+}
+
+export interface BenchmarkAlignmentSummary {
+  alignedCount: number;
+  alignedStartDate: string | null;
+  alignedEndDate: string | null;
+  fundStartDate: string | null;
+  fundEndDate: string | null;
+  benchStartDate: string | null;
+  benchEndDate: string | null;
+  fundOnlyDatesCount: number;
+  benchOnlyDatesCount: number;
+  exactStartEndAligned: boolean;
+}
+
 export interface BenchmarkStatus {
   symbol: string;
   name: string;
-  variant: 'TRI' | 'PRI' | 'Index' | 'Unavailable';
+  variant: BenchmarkReturnVariant;
   available: boolean;
   source: string | null;
   asOfDate: string | null;
   reason: string | null;
   series: NavPoint[];
+  providerIndexId?: string | null;
+  currency?: string;
+  role?: BenchmarkRole;
+  sourceUri?: string | null;
+  fetchedAt?: string | null;
+  snapshotVersion?: string | null;
+  checksumSha256?: string | null;
+  coverageStart?: string | null;
+  coverageEnd?: string | null;
+  observationCount?: number;
+  gapCount?: number;
+  maxGapCalendarDays?: number | null;
+  gapSpans?: { fromDate: string; toDate: string; calendarDays: number }[];
+  checkpointVerified?: boolean;
+  isTestFixture?: boolean;
+  effectiveFrom?: string | null;
+  effectiveTo?: string | null;
 }
 
 export interface TrailingCagr {
@@ -354,6 +466,11 @@ export interface RiskMetrics {
   peakDate: string | null;
   maxDdDate: string | null;
   recoveryDate: string | null;
+
+  // Batch 2 aligned benchmark comparison provenance
+  benchmarkSymbolApplied?: string | null;
+  benchmarkRoleApplied?: BenchmarkRole | null;
+  alignmentSummary?: BenchmarkAlignmentSummary | null;
 
   // Debt specific metrics if applicable
   ytm?: number | null;

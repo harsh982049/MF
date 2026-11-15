@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 
 import {
+  BenchmarkStatus,
   FundMeta,
   NavPoint,
   NavValidationReport,
@@ -30,7 +31,7 @@ import {
   PRESET_FUNDS,
   BENCHMARKS,
   DEFAULT_VERIFIED_PRESET_CODES,
-  resolveBenchmarkSeries,
+  resolveVerifiedBenchmarkSeries,
   fetchLiveMfNav,
 } from './data/presetFunds';
 import {
@@ -135,7 +136,23 @@ export default function App() {
     for (const code of selectedCodes) {
       const entry = validatedSeriesMap[code];
       const effId = entry?.identity ?? allFunds[code]?.identityStatus;
-      map[code] = entry && entry.validation.usable && effId?.verified ? entry.points : [];
+      map[code] =
+        entry && entry.validation.usable && effId?.verified
+          ? entry.adjustedPoints ?? entry.points
+          : [];
+    }
+    return map;
+  }, [selectedCodes, validatedSeriesMap, allFunds]);
+
+  const rawSeriesMap = useMemo(() => {
+    const map: Record<number, NavPoint[]> = {};
+    for (const code of selectedCodes) {
+      const entry = validatedSeriesMap[code];
+      const effId = entry?.identity ?? allFunds[code]?.identityStatus;
+      map[code] =
+        entry && entry.validation.usable && effId?.verified
+          ? entry.rawPoints ?? entry.points
+          : [];
     }
     return map;
   }, [selectedCodes, validatedSeriesMap, allFunds]);
@@ -196,8 +213,19 @@ export default function App() {
 
   // Independent Benchmark Resolution: strictly invariant to fund list, lead fund, or reorder
   const benchmarkStatus = useMemo(() => {
-    return resolveBenchmarkSeries(benchmarkSymbol);
+    return resolveVerifiedBenchmarkSeries(benchmarkSymbol, 'common_comparator');
   }, [benchmarkSymbol]);
+
+  const schemeDefaultBenchmarks = useMemo(() => {
+    const map: Record<number, BenchmarkStatus> = {};
+    for (const code of selectedCodes) {
+      const fund = allFunds[code];
+      if (fund) {
+        map[code] = resolveVerifiedBenchmarkSeries(fund.benchmark_symbol, 'scheme_default');
+      }
+    }
+    return map;
+  }, [selectedCodes, allFunds]);
 
   const benchmarkSeries = benchmarkStatus.series;
 
@@ -297,10 +325,11 @@ export default function App() {
         fund?.category || 'Unclassified',
         fund?.asset_class || 'Equity',
         rfRate / 100.0,
-        breaks
+        breaks,
+        { symbol: benchmarkStatus.symbol, role: benchmarkStatus.role || 'common_comparator' }
       );
     });
-  }, [selectedCodes, allFunds, fundSeriesMap, validationMap, benchmarkSeries, rfRate]);
+  }, [selectedCodes, allFunds, fundSeriesMap, validationMap, benchmarkSeries, benchmarkStatus.symbol, benchmarkStatus.role, rfRate]);
 
   // Overlap, Market-Cap, Sector & Return Correlation (coverage-aware)
   const overlapData = useMemo(() => {
@@ -569,6 +598,14 @@ export default function App() {
                   <span className="truncate max-w-[150px] font-medium" title={`${fund.name} (${fund.isin ?? 'Unavailable'})`}>
                     {fund.name}
                   </span>
+                  {val?.adjustedApplied && (
+                    <span
+                      className="text-[9px] px-1 py-0.2 rounded bg-sky-950 text-sky-300 border border-sky-800/70"
+                      title={val.appliedCorporateActions?.map((a) => `${a.actionId} (${a.factor}:1)`).join(', ')}
+                    >
+                      Split Adjusted
+                    </span>
+                  )}
                   {isQuarantined && (
                     <span className="text-[9px] px-1 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-800/70">
                       Split Quarantine
@@ -645,8 +682,18 @@ export default function App() {
                 </option>
               ))}
             </select>
-            <div className="text-[10px] text-amber-400/90 mt-1.5 leading-snug">
-              Status: {benchmarkStatus.available ? `Verified (${benchmarkStatus.source})` : 'Unavailable (Batch 2 TRI feed pending)'}
+            <div className="text-[10px] text-amber-400/90 mt-1.5 leading-snug space-y-0.5">
+              <div>
+                Status:{' '}
+                {benchmarkStatus.available
+                  ? `Verified ${benchmarkStatus.variant} (${benchmarkStatus.providerIndexId}, ${benchmarkStatus.coverageStart}..${benchmarkStatus.coverageEnd})`
+                  : benchmarkStatus.reason || 'Unavailable'}
+              </div>
+              {benchmarkStatus.available && (
+                <div className="text-slate-400 font-mono text-[9px] truncate" title={`Snapshot ${benchmarkStatus.snapshotVersion} | SHA256 ${benchmarkStatus.checksumSha256}`}>
+                  {benchmarkStatus.snapshotVersion} · {benchmarkStatus.observationCount} obs · {benchmarkStatus.gapCount ?? 0} extended gaps
+                </div>
+              )}
             </div>
           </div>
 
@@ -1075,7 +1122,7 @@ export default function App() {
                   <div>
                     <h2 className="text-base font-bold text-white tracking-tight">Risk-Adjusted Ratios &amp; Active Alpha</h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Rf Applied = {rfRate.toFixed(2)}% · Benchmark = {benchmarkStatus.name} ({benchmarkStatus.available ? benchmarkStatus.variant : 'Unavailable'})
+                      Rf Applied = {rfRate.toFixed(2)}% · Comparator = {benchmarkStatus.name} ({benchmarkStatus.available ? `${benchmarkStatus.variant} · ${benchmarkStatus.providerIndexId}` : 'Unavailable'})
                     </p>
                   </div>
                 </div>
@@ -1818,10 +1865,12 @@ export default function App() {
         riskMetrics={riskMetricsList}
         trailingMetaMap={trailingMetaMap}
         seriesMap={fundSeriesMap}
+        rawSeriesMap={rawSeriesMap}
         validationMap={validationMap}
         identityMap={identityMap}
         holdingsOverlap={overlapData.overlapMatrixResult}
         benchmarkStatus={benchmarkStatus}
+        schemeDefaultBenchmarks={schemeDefaultBenchmarks}
         rfRate={rfRate}
       />
     </div>

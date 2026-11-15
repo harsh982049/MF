@@ -1,5 +1,7 @@
 import {
+  AppliedCorporateAction,
   CorporateActionBreak,
+  CorporateActionRecord,
   NavPoint,
   RejectedPayloadDiagnostics,
   RawNavObservation,
@@ -22,7 +24,33 @@ export interface ValidateNavOptions {
   returnedSchemeCode?: number | null;
   returnedSchemeName?: string | null;
   returnedIsin?: string | null;
+  corporateActions?: CorporateActionRecord[];
+  seriesIsin?: string | null;
 }
+
+/**
+ * Verified Corporate Action Registry (Batch 2).
+ * Source Circular for 113049: https://nsearchives.nseindia.com/content/circulars/CML47320.pdf
+ * (NSE/CML/47320, Circular 0141/2021 dated 12-Feb-2021: HDFC Gold ETF face value Rs.100 -> Rs.1,
+ * AMFI NAV split reflected from 19-Feb-2021 [4120.0604] to 22-Feb-2021 [41.5242]).
+ */
+export const VERIFIED_CORPORATE_ACTIONS: Record<number, CorporateActionRecord[]> = {
+  113049: [
+    {
+      actionId: 'NSE-CML-47320-113049-SPLIT-100-1',
+      schemeCode: 113049,
+      actionType: 'unit_split',
+      factor: 100,
+      effectiveDate: '2021-02-22',
+      preActionIsin: 'INF179KC1981',
+      postActionIsin: 'INF179KC1981',
+      sourceCircular: 'https://nsearchives.nseindia.com/content/circulars/CML47320.pdf',
+      description:
+        'HDFC Gold ETF 100:1 face-value split (Rs. 100 -> Rs. 1 per unit per NSE Circular NSE/CML/47320, AMFI post-split NAV effective 2021-02-22).',
+      verified: true,
+    },
+  ],
+};
 
 /**
  * Returns today's calendar date (YYYY-MM-DD) in India Standard Time (Asia/Kolkata).
@@ -126,6 +154,257 @@ export function doesWindowSpanCorporateActionBreak(
     }
   }
   return null;
+}
+
+export interface ApplyCorporateActionsOptions {
+  schemeCode?: number;
+  seriesIsin?: string | null;
+  preSplitIsin?: string | null;
+  postSplitIsin?: string | null;
+  alreadyAppliedActionIds?: string[];
+}
+
+export interface ApplyCorporateActionsResult {
+  rawPoints: NavPoint[];
+  adjustedPoints: NavPoint[];
+  appliedActionIds: string[];
+  appliedCorporateActions: AppliedCorporateAction[];
+  adjustedApplied: boolean;
+  warnings: string[];
+}
+
+/**
+ * Idempotently constructs a corporate-action-adjusted NAV history alongside the untouched raw history.
+ * - Rejects unverified actions, nonpositive factors, and mismatched ISIN mappings.
+ * - Never re-applies an action whose actionId is already recorded in appliedActionIds.
+ * - Preserves rawPoints verbatim and keeps out-of-window histories untouched.
+ */
+export function applyCorporateActionsToPoints(
+  sortedValidRawPoints: NavPoint[],
+  corporateActions: CorporateActionRecord[],
+  options: ApplyCorporateActionsOptions = {}
+): ApplyCorporateActionsResult {
+  const rawPoints = sortedValidRawPoints.map((p) => ({ date: p.date, nav: p.nav }));
+  const currentAdjusted = sortedValidRawPoints.map((p) => ({ date: p.date, nav: p.nav }));
+  const appliedActionIds = new Set<string>(options.alreadyAppliedActionIds || []);
+  const appliedCorporateActions: AppliedCorporateAction[] = [];
+  const warnings: string[] = [];
+
+  if (rawPoints.length === 0 || !corporateActions || corporateActions.length === 0) {
+    return {
+      rawPoints,
+      adjustedPoints: currentAdjusted,
+      appliedActionIds: Array.from(appliedActionIds),
+      appliedCorporateActions,
+      adjustedApplied: false,
+      warnings,
+    };
+  }
+
+  const orderedActions = [...corporateActions].sort((a, b) =>
+    a.effectiveDate.localeCompare(b.effectiveDate)
+  );
+  const schemeIsin = (options.seriesIsin || '').trim().toUpperCase() || null;
+  const preIsinOverride = (options.preSplitIsin || '').trim().toUpperCase() || null;
+  const postIsinOverride = (options.postSplitIsin || '').trim().toUpperCase() || null;
+
+  let anyAdjusted = false;
+
+  for (const action of orderedActions) {
+    if (!action || !action.verified) continue;
+    if (options.schemeCode && action.schemeCode !== options.schemeCode) continue;
+    if (!isValidIsoCalendarDate(action.effectiveDate)) continue;
+    if (!Number.isFinite(action.factor) || action.factor <= 0) continue;
+
+    // Idempotency guard: never divide twice for an already applied actionId
+    if (appliedActionIds.has(action.actionId)) {
+      continue;
+    }
+
+    const expectedPreIsin = action.preActionIsin ? action.preActionIsin.trim().toUpperCase() : null;
+    const expectedPostIsin = action.postActionIsin.trim().toUpperCase();
+
+    // Effective pre/post ISIN mapping verification
+    const effectiveIsinToCheck = postIsinOverride || schemeIsin;
+    if (effectiveIsinToCheck && effectiveIsinToCheck !== expectedPostIsin) {
+      warnings.push(
+        `Skipped corporate action ${action.actionId}: scheme ISIN ${effectiveIsinToCheck} does not match expected post-action ISIN ${expectedPostIsin}.`
+      );
+      appliedCorporateActions.push({
+        actionId: action.actionId,
+        schemeCode: action.schemeCode,
+        actionType: action.actionType,
+        factor: action.factor,
+        effectiveDate: action.effectiveDate,
+        preActionIsin: action.preActionIsin,
+        postActionIsin: action.postActionIsin,
+        sourceCircular: action.sourceCircular,
+        affectedObservationCount: 0,
+        windowStatus: 'isin_mismatch_skipped',
+      });
+      continue;
+    }
+    if (preIsinOverride && expectedPreIsin && preIsinOverride !== expectedPreIsin) {
+      warnings.push(
+        `Skipped corporate action ${action.actionId}: pre-split ISIN ${preIsinOverride} does not match expected pre-action ISIN ${expectedPreIsin}.`
+      );
+      appliedCorporateActions.push({
+        actionId: action.actionId,
+        schemeCode: action.schemeCode,
+        actionType: action.actionType,
+        factor: action.factor,
+        effectiveDate: action.effectiveDate,
+        preActionIsin: action.preActionIsin,
+        postActionIsin: action.postActionIsin,
+        sourceCircular: action.sourceCircular,
+        affectedObservationCount: 0,
+        windowStatus: 'isin_mismatch_skipped',
+      });
+      continue;
+    }
+
+    const preBoundaryRaw = [...rawPoints]
+      .reverse()
+      .find((p) => p.date < action.effectiveDate && p.nav > 0);
+    const postBoundaryRaw = rawPoints.find((p) => p.date >= action.effectiveDate && p.nav > 0);
+
+    let affectedCount = 0;
+    for (let i = 0; i < currentAdjusted.length; i++) {
+      if (currentAdjusted[i].date < action.effectiveDate && currentAdjusted[i].nav > 0) {
+        currentAdjusted[i] = {
+          date: currentAdjusted[i].date,
+          nav: Number((currentAdjusted[i].nav / action.factor).toFixed(6)),
+        };
+        affectedCount++;
+      }
+    }
+
+    appliedActionIds.add(action.actionId);
+
+    if (affectedCount === 0) {
+      appliedCorporateActions.push({
+        actionId: action.actionId,
+        schemeCode: action.schemeCode,
+        actionType: action.actionType,
+        factor: action.factor,
+        effectiveDate: action.effectiveDate,
+        preActionIsin: action.preActionIsin,
+        postActionIsin: action.postActionIsin,
+        sourceCircular: action.sourceCircular,
+        affectedObservationCount: 0,
+        windowStatus: 'out_of_window',
+      });
+      continue;
+    }
+
+    anyAdjusted = true;
+    const preBoundaryAdj = preBoundaryRaw
+      ? Number((preBoundaryRaw.nav / action.factor).toFixed(6))
+      : null;
+    const adjReturnPct =
+      preBoundaryAdj && preBoundaryAdj > 0 && postBoundaryRaw
+        ? Number((((postBoundaryRaw.nav / preBoundaryAdj) - 1) * 100).toFixed(2))
+        : null;
+
+    appliedCorporateActions.push({
+      actionId: action.actionId,
+      schemeCode: action.schemeCode,
+      actionType: action.actionType,
+      factor: action.factor,
+      effectiveDate: action.effectiveDate,
+      preActionIsin: action.preActionIsin,
+      postActionIsin: action.postActionIsin,
+      sourceCircular: action.sourceCircular,
+      affectedObservationCount: affectedCount,
+      windowStatus: 'applied',
+      rawPreSplitBoundaryNav: preBoundaryRaw?.nav ?? null,
+      rawPostSplitBoundaryNav: postBoundaryRaw?.nav ?? null,
+      adjustedPreSplitBoundaryNav: preBoundaryAdj,
+      adjustedBoundaryReturnPct: adjReturnPct,
+    });
+
+    warnings.push(
+      `Applied verified corporate action ${action.actionId} (factor ${action.factor}:1 effective ${action.effectiveDate}) to ${affectedCount} pre-split observation(s).`
+    );
+  }
+
+  return {
+    rawPoints,
+    adjustedPoints: currentAdjusted,
+    appliedActionIds: Array.from(appliedActionIds),
+    appliedCorporateActions,
+    adjustedApplied: anyAdjusted,
+    warnings,
+  };
+}
+
+/**
+ * Idempotently applies verified corporate actions to an existing ValidatedNavSeries.
+ * Guarantees re-applying the same corporateAction.actionId never divides twice.
+ */
+export function applyCorporateActionsToSeries(
+  series: ValidatedNavSeries,
+  corporateActions?: CorporateActionRecord[],
+  options: Omit<ApplyCorporateActionsOptions, 'schemeCode' | 'alreadyAppliedActionIds'> = {}
+): ValidatedNavSeries {
+  if (!series.validation.usable || series.points.length === 0) {
+    return series;
+  }
+
+  const actions =
+    corporateActions ?? VERIFIED_CORPORATE_ACTIONS[series.schemeCode] ?? [];
+  const rawBase = series.rawPoints && series.rawPoints.length > 0 ? series.rawPoints : series.points;
+  const alreadyApplied = series.appliedActionIds || [];
+
+  const pendingActions = actions.filter((a) => !alreadyApplied.includes(a.actionId));
+  if (pendingActions.length === 0) {
+    return series;
+  }
+
+  const baseForAdjust = series.adjustedPoints && series.adjustedPoints.length > 0
+    ? series.adjustedPoints
+    : series.points;
+
+  const adjResult = applyCorporateActionsToPoints(baseForAdjust, pendingActions, {
+    ...options,
+    schemeCode: series.schemeCode,
+    seriesIsin: options.seriesIsin ?? series.identity?.providerIsin ?? series.identity?.registryIsin,
+    alreadyAppliedActionIds: alreadyApplied,
+  });
+
+  if (!adjResult.adjustedApplied && adjResult.appliedCorporateActions.length === 0) {
+    return series;
+  }
+
+  const remainingBreaks = detectCorporateActionBreaks(adjResult.adjustedPoints);
+  const quarantinedFromBreak = remainingBreaks.length > 0;
+  const mergedAppliedActions = [
+    ...(series.validation.appliedCorporateActions || []),
+    ...adjResult.appliedCorporateActions,
+  ];
+  const mergedWarnings = [...series.validation.warnings, ...adjResult.warnings];
+  for (const brk of remainingBreaks) {
+    if (!mergedWarnings.includes(brk.explanation)) {
+      mergedWarnings.push(brk.explanation);
+    }
+  }
+
+  return {
+    ...series,
+    points: adjResult.adjustedPoints,
+    rawPoints: rawBase,
+    adjustedPoints: adjResult.adjustedPoints,
+    appliedActionIds: adjResult.appliedActionIds,
+    validation: {
+      ...series.validation,
+      status: quarantinedFromBreak ? 'quarantined_partial' : 'valid',
+      corporateActionBreaks: remainingBreaks,
+      appliedCorporateActions: mergedAppliedActions,
+      adjustedApplied: Boolean(series.validation.adjustedApplied || adjResult.adjustedApplied),
+      quarantinedFromBreak,
+      warnings: mergedWarnings,
+    },
+  };
 }
 
 function buildSampleObservations(
@@ -564,7 +843,30 @@ export function validateRawNavSeries(
     };
   }
 
-  const corporateActionBreaks = detectCorporateActionBreaks(sortedPoints);
+  const effectiveActions =
+    options.corporateActions !== undefined
+      ? options.corporateActions
+      : VERIFIED_CORPORATE_ACTIONS[schemeCode] ?? [];
+
+  const effectiveIsin =
+    options.seriesIsin ??
+    identity?.registryIsin ??
+    identity?.providerIsin ??
+    resolvedReturnedIsin;
+
+  const adjResult = applyCorporateActionsToPoints(sortedPoints, effectiveActions, {
+    schemeCode,
+    seriesIsin: effectiveIsin,
+  });
+
+  const finalAdjustedPoints = adjResult.adjustedPoints;
+  for (const w of adjResult.warnings) {
+    warnings.push(w);
+  }
+
+  // Run break detection on the adjusted series so verified resolved splits clear quarantine,
+  // while ANY unresolved break without a verified corporate-action record stays quarantined.
+  const corporateActionBreaks = detectCorporateActionBreaks(finalAdjustedPoints);
   const quarantinedFromBreak = corporateActionBreaks.length > 0;
   for (const brk of corporateActionBreaks) {
     warnings.push(brk.explanation);
@@ -572,7 +874,10 @@ export function validateRawNavSeries(
 
   return {
     schemeCode,
-    points: sortedPoints,
+    points: finalAdjustedPoints,
+    rawPoints: adjResult.rawPoints,
+    adjustedPoints: finalAdjustedPoints,
+    appliedActionIds: adjResult.appliedActionIds,
     rawObservations,
     identity,
     validation: {
@@ -582,7 +887,7 @@ export function validateRawNavSeries(
       fetchedAt,
       valuationCutoffDate: cutoffIso,
       totalRawCount: rawItems.length,
-      validCount: sortedPoints.length,
+      validCount: finalAdjustedPoints.length,
       rejectedInvalidDateCount,
       rejectedNonPositiveCount,
       rejectedNonFiniteCount,
@@ -591,9 +896,13 @@ export function validateRawNavSeries(
       duplicateConflicts: [],
       earliestDate,
       latestDate,
+      rawEarliestDate: earliestDate,
+      rawLatestDate: latestDate,
       isStale: false,
       staleDays,
       corporateActionBreaks,
+      appliedCorporateActions: adjResult.appliedCorporateActions,
+      adjustedApplied: adjResult.adjustedApplied,
       quarantinedFromBreak,
       unavailableReason: null,
       warnings,

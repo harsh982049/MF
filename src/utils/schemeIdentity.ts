@@ -93,6 +93,16 @@ export const TRUSTED_AMFI_REGISTRY: Record<number, TrustedRegistryEntry> = {
     source: AMFI_SNAPSHOT_SOURCE,
     acceptedAliases: ['SBI Bluechip Fund', 'SBI Bluechip Large Cap Fund', 'SBI Large Cap Fund'],
   },
+  113049: {
+    scheme_code: 113049,
+    scheme_name: 'HDFC Gold ETF - Growth Option',
+    plan: 'ETF',
+    option: 'Growth',
+    isin: 'INF179KC1981',
+    asOfDate: AMFI_SNAPSHOT_DATE,
+    source: 'https://portal.amfiindia.com/DownloadNAVHistoryReport_Po.aspx?mf=9',
+    acceptedAliases: ['HDFC Gold ETF', 'HDFC Gold Exchange Traded Fund'],
+  },
 };
 
 /**

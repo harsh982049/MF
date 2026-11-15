@@ -18,17 +18,22 @@ import {
   FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT,
 } from '../utils/quantEngine';
 import { getIndiaValuationDateIso } from '../utils/navValidator';
-import { AMFI_SNAPSHOT_DATE } from '../utils/schemeIdentity';
+import {
+  AMFI_SNAPSHOT_DATE
+} from '../utils/schemeIdentity';
+import { resolveVerifiedBenchmarkSeries } from '../data/genuineBenchmarks';
 
 export interface ExportBuilderInput {
   selectedFunds: FundMeta[];
   riskMetrics: RiskMetrics[];
   trailingMetaMap: Record<number, TrailingCagrResult>;
   seriesMap: Record<number, NavPoint[]>;
+  rawSeriesMap?: Record<number, NavPoint[]>;
   validationMap: Record<number, NavValidationReport | undefined>;
   identityMap?: Record<number, SchemeIdentityAudit | undefined>;
   holdingsOverlap?: OverlapMatrixResult;
   benchmarkStatus: BenchmarkStatus;
+  schemeDefaultBenchmarks?: Record<number, BenchmarkStatus>;
   rfRate: number;
   exportTimestamp?: string;
 }
@@ -164,15 +169,16 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
     validationMap,
     identityMap,
     benchmarkStatus,
+    schemeDefaultBenchmarks,
     rfRate,
     exportTimestamp = new Date().toISOString(),
   } = input;
 
   const provenance = [
-    `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio (Batch 1 Safe Export)`,
+    `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio (Batch 2 Verified Benchmark & Split-Aware Export)`,
     `# NAV Feed Provider: mfapi.in (third-party historical NAV mirror; strictly validated)`,
     `# Identity Registry Benchmark: AMFI India NAVAll Snapshot (${AMFI_SNAPSHOT_DATE})`,
-    `# Selected Benchmark: ${benchmarkStatus.name} (${benchmarkStatus.symbol}) | Variant: ${benchmarkStatus.variant} | Status: ${benchmarkStatus.available ? `Verified (${benchmarkStatus.source}, as of ${benchmarkStatus.asOfDate})` : `Unavailable (${benchmarkStatus.reason})`}`,
+    `# Common Comparator Benchmark (${benchmarkStatus.role || 'common_comparator'}): ${benchmarkStatus.name} (${benchmarkStatus.symbol}) | ProviderID: ${benchmarkStatus.providerIndexId || 'Unavailable'} | Variant: ${benchmarkStatus.variant} | Currency: ${benchmarkStatus.currency || 'INR'} | Snapshot: ${benchmarkStatus.snapshotVersion || 'Unavailable'} | Checksum: ${benchmarkStatus.checksumSha256 || 'Unavailable'} | Gaps(>4d): ${benchmarkStatus.gapCount ?? 0} | TestFixture: ${Boolean(benchmarkStatus.isTestFixture)} | Status: ${benchmarkStatus.available ? `Verified (${benchmarkStatus.source}, ${benchmarkStatus.coverageStart}..${benchmarkStatus.coverageEnd})` : `Unavailable (${benchmarkStatus.reason})`}`,
     `# Risk-Free Rate Applied: ${rfRate.toFixed(2)}% Annualized`,
     `# Export Timestamp: ${exportTimestamp}`,
     `#`,
@@ -279,6 +285,23 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
     '7Y Rolling Std Dev',
     '7Y Rolling % Positive Windows',
     '7Y Benchmark Hit Rate (%)',
+    'Disclosed Default Benchmark Symbol',
+    'Disclosed Default Benchmark Name',
+    'Disclosed Default Benchmark Role',
+    'Disclosed Default Benchmark Provider ID',
+    'Disclosed Default Benchmark Status',
+    'Comparator Role Applied',
+    'Comparator Provider Index ID',
+    'Comparator Snapshot Version',
+    'Comparator Checksum SHA256',
+    'Aligned Comparison Start',
+    'Aligned Comparison End',
+    'Aligned Sessions Count',
+    'Raw Window Start',
+    'Raw Window End',
+    'Corporate Action Adjusted',
+    'Applied Corporate Action IDs',
+    'Applied Corporate Action Factors',
   ];
 
   const rows = selectedFunds.map((fund) => {
@@ -326,6 +349,19 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
             '"Unavailable"',
             '"Unavailable"',
           ];
+
+    const defaultBm =
+      schemeDefaultBenchmarks?.[fund.scheme_code] ??
+      resolveVerifiedBenchmarkSeries(fund.benchmark_symbol, 'scheme_default');
+    const appliedActions = (eff.usable ? valReport?.appliedCorporateActions : null) ?? [];
+    const appliedActionIds = appliedActions
+      .filter((a) => a.windowStatus === 'applied')
+      .map((a) => a.actionId)
+      .join('; ');
+    const appliedActionFactors = appliedActions
+      .filter((a) => a.windowStatus === 'applied')
+      .map((a) => `${a.factor}:1@${a.effectiveDate}`)
+      .join('; ');
 
     return [
       fund.scheme_code,
@@ -400,6 +436,23 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
       ...rollCells(r3, hit3),
       ...rollCells(r5, hit5),
       ...rollCells(r7, hit7),
+      csvText(fund.benchmark_symbol),
+      csvText(defaultBm.name),
+      csvText(defaultBm.role || 'scheme_default'),
+      csvText(defaultBm.providerIndexId || 'Unavailable'),
+      csvText(defaultBm.available ? `Verified (${defaultBm.variant})` : 'Unavailable'),
+      csvText(benchmarkStatus.role || 'common_comparator'),
+      csvText(benchmarkStatus.providerIndexId || 'Unavailable'),
+      csvText(benchmarkStatus.snapshotVersion || 'Unavailable'),
+      csvText(benchmarkStatus.checksumSha256 || 'Unavailable'),
+      csvText(rm?.alignmentSummary?.alignedStartDate ?? null),
+      csvText(rm?.alignmentSummary?.alignedEndDate ?? null),
+      rm?.alignmentSummary?.alignedCount ?? 0,
+      csvText(eff.usable ? valReport?.rawEarliestDate ?? eff.earliestDate : null),
+      csvText(eff.usable ? valReport?.rawLatestDate ?? eff.latestDate : null),
+      csvText(eff.usable && valReport?.adjustedApplied ? 'Yes' : 'No'),
+      csvText(appliedActionIds || 'None'),
+      csvText(appliedActionFactors || 'None'),
     ].join(',');
   });
 
@@ -412,10 +465,12 @@ export function buildComparisonJsonPayload(input: ExportBuilderInput) {
     riskMetrics,
     trailingMetaMap,
     seriesMap,
+    rawSeriesMap,
     validationMap,
     identityMap,
     holdingsOverlap,
     benchmarkStatus,
+    schemeDefaultBenchmarks,
     rfRate,
     exportTimestamp = new Date().toISOString(),
   } = input;
@@ -432,7 +487,20 @@ export function buildComparisonJsonPayload(input: ExportBuilderInput) {
         name: benchmarkStatus.name,
         variant: benchmarkStatus.variant,
         available: benchmarkStatus.available,
+        role: benchmarkStatus.role || 'common_comparator',
+        providerIndexId: benchmarkStatus.providerIndexId ?? null,
+        currency: benchmarkStatus.currency ?? 'INR',
         source: benchmarkStatus.source,
+        sourceUri: benchmarkStatus.sourceUri ?? null,
+        fetchedAt: benchmarkStatus.fetchedAt ?? null,
+        snapshotVersion: benchmarkStatus.snapshotVersion ?? null,
+        checksumSha256: benchmarkStatus.checksumSha256 ?? null,
+        coverageStart: benchmarkStatus.coverageStart ?? null,
+        coverageEnd: benchmarkStatus.coverageEnd ?? null,
+        observationCount: benchmarkStatus.observationCount ?? benchmarkStatus.series.length,
+        gapCount: benchmarkStatus.gapCount ?? 0,
+        maxGapCalendarDays: benchmarkStatus.maxGapCalendarDays ?? null,
+        isTestFixture: Boolean(benchmarkStatus.isTestFixture),
         asOfDate: benchmarkStatus.asOfDate,
         reason: benchmarkStatus.reason,
       },
@@ -461,12 +529,40 @@ export function buildComparisonJsonPayload(input: ExportBuilderInput) {
         benchmarkStatus
       );
       const hCov = computeHoldingsCoverage(fund.holdings, fund.holdingsStatus.partialCoverage);
+      const defaultBm =
+        schemeDefaultBenchmarks?.[fund.scheme_code] ??
+        resolveVerifiedBenchmarkSeries(fund.benchmark_symbol, 'scheme_default');
 
       return {
         meta: fund,
         effectiveIdentity: eff.effectiveIdentity,
         usable: eff.usable,
         failureReason: eff.failureReason,
+        schemeDefaultBenchmark: {
+          symbol: defaultBm.symbol,
+          name: defaultBm.name,
+          role: defaultBm.role || 'scheme_default',
+          providerIndexId: defaultBm.providerIndexId ?? null,
+          variant: defaultBm.variant,
+          available: defaultBm.available,
+          sourceUri: defaultBm.sourceUri ?? null,
+          snapshotVersion: defaultBm.snapshotVersion ?? null,
+          checksumSha256: defaultBm.checksumSha256 ?? null,
+          coverageStart: defaultBm.coverageStart ?? null,
+          coverageEnd: defaultBm.coverageEnd ?? null,
+          reason: defaultBm.reason,
+        },
+        corporateActions: {
+          adjustedApplied: Boolean(eff.usable && valReport?.adjustedApplied),
+          rawEarliestDate: eff.usable ? valReport?.rawEarliestDate ?? eff.earliestDate : null,
+          rawLatestDate: eff.usable ? valReport?.rawLatestDate ?? eff.latestDate : null,
+          rawObservationCount: eff.usable
+            ? rawSeriesMap?.[fund.scheme_code]?.length ?? eff.validCount
+            : 0,
+          adjustedObservationCount: eff.validCount,
+          appliedActions: (eff.usable ? valReport?.appliedCorporateActions : []) || [],
+          unresolvedBreaks: (eff.usable ? valReport?.corporateActionBreaks : []) || [],
+        },
         navValidation: valReport
           ? {
               ...valReport,
@@ -517,6 +613,7 @@ export function buildSingleFundFactsheetCsv(
     validationMap,
     identityMap,
     benchmarkStatus,
+    schemeDefaultBenchmarks,
     rfRate,
     exportTimestamp = new Date().toISOString(),
   } = input;
@@ -553,6 +650,10 @@ export function buildSingleFundFactsheetCsv(
 
   const hCov = computeHoldingsCoverage(fund.holdings, fund.holdingsStatus.partialCoverage);
   const diag = valReport?.rejectedPayloadDiagnostics ?? null;
+  const defaultBm =
+    schemeDefaultBenchmarks?.[fund.scheme_code] ??
+    resolveVerifiedBenchmarkSeries(fund.benchmark_symbol, 'scheme_default');
+  const appliedActions = (eff.usable ? valReport?.appliedCorporateActions : null) ?? [];
 
   const fmtRollRow = (label: string, r: typeof r1, hit: number | null) =>
     [
@@ -573,7 +674,8 @@ export function buildSingleFundFactsheetCsv(
     `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio`,
     `# NAV Feed Source: api.mfapi.in/mf/${fund.scheme_code} (Status: ${valReport?.status || 'unavailable'})`,
     `# AMFI Identity Reconciliation: ${eff.effectiveIdentity.status} (${AMFI_SNAPSHOT_DATE})`,
-    `# Benchmark Status: ${benchmarkStatus.name} | Variant: ${benchmarkStatus.variant} | Available: ${benchmarkStatus.available}`,
+    `# Common Comparator Benchmark (${benchmarkStatus.role || 'common_comparator'}): ${benchmarkStatus.name} (${benchmarkStatus.providerIndexId || 'Unavailable'}) | Variant: ${benchmarkStatus.variant} | Snapshot: ${benchmarkStatus.snapshotVersion || 'Unavailable'} | Available: ${benchmarkStatus.available}`,
+    `# Disclosed Scheme-Default Benchmark (${defaultBm.role || 'scheme_default'}): ${defaultBm.name} (${defaultBm.providerIndexId || 'Unavailable'}) | Variant: ${defaultBm.variant} | Available: ${defaultBm.available}`,
     `# Risk-Free Rate Applied: ${rfRate.toFixed(2)}%`,
     `# Disclosure Source: ${fund.disclosureSource || 'Unavailable'}`,
     `# Export Timestamp: ${exportTimestamp}`,
@@ -597,6 +699,17 @@ export function buildSingleFundFactsheetCsv(
     `"Rejected Post-Cutoff Count",${eff.rejectedPostCutoffCount}`,
     `"NAV Validation Window",${csvText(eff.earliestDate && eff.latestDate ? `${eff.earliestDate} to ${eff.latestDate}` : null)}`,
     `"Validated NAV Observations",${eff.validCount}`,
+    `"Corporate Action Adjustment Applied",${csvText(eff.usable && valReport?.adjustedApplied ? 'Yes' : 'No')}`,
+    `"Applied Corporate Actions",${csvText(
+      appliedActions.length > 0
+        ? appliedActions
+            .map(
+              (a) =>
+                `${a.actionId} (factor=${a.factor}:1, eff=${a.effectiveDate}, preISIN=${a.preActionIsin || 'N/A'}, postISIN=${a.postActionIsin}, status=${a.windowStatus}, src=${a.sourceCircular})`
+            )
+            .join(' | ')
+        : 'None'
+    )}`,
     `"Rejected Payload Diagnostics",${csvText(diag ? `Requested ${diag.requestedSchemeCode}, Returned ${diag.returnedSchemeCode ?? 'null'} (${diag.totalRawCount} raw obs): ${diag.reason}` : 'None')}`,
     `"Holdings Coverage Status",${csvText(
       !hCov.hasHoldings
@@ -618,7 +731,10 @@ export function buildSingleFundFactsheetCsv(
     `"Category",${csvText(fund.category)}`,
     `"Asset Class",${csvText(fund.asset_class)}`,
     `"Fund House",${csvText(fund.fund_house)}`,
-    `"Selected Benchmark",${csvText(`${benchmarkStatus.name} (${benchmarkStatus.variant})`)}`,
+    `"Selected Common Comparator",${csvText(`${benchmarkStatus.name} (${benchmarkStatus.variant}, ${benchmarkStatus.providerIndexId || 'Unavailable'})`)}`,
+    `"Disclosed Default Benchmark",${csvText(`${defaultBm.name} (${defaultBm.variant}, ${defaultBm.providerIndexId || 'Unavailable'})`)}`,
+    `"Comparator Snapshot & Checksum",${csvText(benchmarkStatus.available ? `${benchmarkStatus.snapshotVersion} | ${benchmarkStatus.checksumSha256}` : 'Unavailable')}`,
+    `"Aligned Comparison Window",${csvText(rm?.alignmentSummary?.alignedStartDate && rm?.alignmentSummary?.alignedEndDate ? `${rm.alignmentSummary.alignedStartDate} to ${rm.alignmentSummary.alignedEndDate} (${rm.alignmentSummary.alignedCount} sessions)` : null)}`,
     `"Inception Date",${csvText(fund.inception_date)}`,
     `"AUM (Cr INR)",${csvNum(fund.aum_cr)}`,
     `"Direct TER (%)",${csvNum(fund.expense_ratio_direct)}`,
@@ -691,6 +807,7 @@ export function buildRawNavCsv(input: ExportBuilderInput): string {
   const {
     selectedFunds,
     seriesMap,
+    rawSeriesMap,
     validationMap,
     identityMap,
     benchmarkStatus,
@@ -705,40 +822,51 @@ export function buildRawNavCsv(input: ExportBuilderInput): string {
       identityMap?.[f.scheme_code],
       seriesMap[f.scheme_code] || []
     );
-    return { fund: f, valReport, eff };
+    const rawPts = eff.usable ? rawSeriesMap?.[f.scheme_code] ?? eff.effectiveSeries : [];
+    const hasSplitAdjustedColumn = Boolean(eff.usable && valReport?.adjustedApplied);
+    return { fund: f, valReport, eff, rawPts, hasSplitAdjustedColumn };
   });
 
   const allDatesSet = new Set<string>();
   const benchSeries = benchmarkStatus.available ? benchmarkStatus.series : [];
   benchSeries.forEach((p) => allDatesSet.add(p.date));
 
-  effectiveStates.forEach(({ eff }) => {
+  effectiveStates.forEach(({ eff, rawPts }) => {
     if (eff.usable) {
       eff.effectiveSeries.forEach((p) => allDatesSet.add(p.date));
+      rawPts.forEach((p) => allDatesSet.add(p.date));
     }
   });
 
   const dates = Array.from(allDatesSet).sort();
   const benchMap = new Map(benchSeries.map((p) => [p.date, p.nav]));
-  const fundMaps = effectiveStates.map(({ eff }) => ({
+  const fundMaps = effectiveStates.map(({ eff, rawPts, hasSplitAdjustedColumn }) => ({
     usable: eff.usable,
-    map: new Map(
-      (eff.usable ? eff.effectiveSeries : []).map((p) => [p.date, p.nav])
-    ),
+    adjustedMap: new Map((eff.usable ? eff.effectiveSeries : []).map((p) => [p.date, p.nav])),
+    rawMap: new Map((eff.usable ? rawPts : []).map((p) => [p.date, p.nav])),
+    hasSplitAdjustedColumn,
   }));
+
+  const splitAdjustedStates = effectiveStates.filter((s) => s.hasSplitAdjustedColumn);
 
   const perFundValidationLines = effectiveStates.map(({ fund, valReport, eff }) => {
     const diag = valReport?.rejectedPayloadDiagnostics;
     const diagNote = diag
       ? ` | Diagnostics: requested=${diag.requestedSchemeCode}, returned=${diag.returnedSchemeCode ?? 'null'}, rawRejectedObs=${diag.totalRawCount}`
       : '';
-    return `# Scheme ${fund.scheme_code} (${fund.name}) | Status: ${valReport?.status || 'unavailable'} | Identity: ${eff.effectiveIdentity.status} | ValidObs: ${eff.validCount} | Window: ${eff.earliestDate ?? 'Unavailable'}..${eff.latestDate ?? 'Unavailable'} | FailureReason: ${eff.failureReason ?? 'None (OK)'}${diagNote}`;
+    const appliedNotes =
+      eff.usable && valReport?.appliedCorporateActions && valReport.appliedCorporateActions.length > 0
+        ? ` | CorporateActions: ${valReport.appliedCorporateActions
+            .map((a) => `${a.actionId}(factor=${a.factor},eff=${a.effectiveDate},status=${a.windowStatus})`)
+            .join(',')}`
+        : '';
+    return `# Scheme ${fund.scheme_code} (${fund.name}) | Status: ${valReport?.status || 'unavailable'} | Identity: ${eff.effectiveIdentity.status} | ValidObs: ${eff.validCount} | Window: ${eff.earliestDate ?? 'Unavailable'}..${eff.latestDate ?? 'Unavailable'} | FailureReason: ${eff.failureReason ?? 'None (OK)'}${diagNote}${appliedNotes}`;
   });
 
   const provenance = [
     `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio`,
     `# NAV Time-Series Source: api.mfapi.in (verified scheme identities & validated NAV observations)`,
-    `# Benchmark: ${benchmarkStatus.name} (${benchmarkStatus.symbol}) | Variant: ${benchmarkStatus.variant} | Status: ${benchmarkStatus.available ? `Verified (${benchmarkStatus.source})` : `Unavailable (${benchmarkStatus.reason})`}`,
+    `# Benchmark (${benchmarkStatus.role || 'common_comparator'}): ${benchmarkStatus.name} (${benchmarkStatus.symbol}) | ProviderID: ${benchmarkStatus.providerIndexId || 'Unavailable'} | Variant: ${benchmarkStatus.variant} | Snapshot: ${benchmarkStatus.snapshotVersion || 'Unavailable'} | Checksum: ${benchmarkStatus.checksumSha256 || 'Unavailable'} | Gaps(>4d): ${benchmarkStatus.gapCount ?? 0} | Status: ${benchmarkStatus.available ? `Verified (${benchmarkStatus.source})` : `Unavailable (${benchmarkStatus.reason})`}`,
     `# Export Timestamp: ${exportTimestamp}`,
     `# Total Validated Trading Dates: ${dates.length}`,
     `# SCHEME_VALIDATION_STATUS:`,
@@ -753,12 +881,17 @@ export function buildRawNavCsv(input: ExportBuilderInput): string {
   const headers = [
     'Date',
     benchHeader,
-    ...effectiveStates.map(({ fund, eff }) =>
+    ...effectiveStates.map(({ fund, eff, hasSplitAdjustedColumn }) =>
       csvText(
         eff.usable
-          ? `${fund.name} (${fund.scheme_code})`
+          ? hasSplitAdjustedColumn
+            ? `${fund.name} (${fund.scheme_code}) [Split-Adjusted]`
+            : `${fund.name} (${fund.scheme_code})`
           : `${fund.name} (${fund.scheme_code}) [Unavailable: ${eff.failureReason}]`
       )
+    ),
+    ...splitAdjustedStates.map(({ fund }) =>
+      csvText(`${fund.name} (${fund.scheme_code}) [Raw Unadjusted]`)
     ),
   ];
 
@@ -766,10 +899,15 @@ export function buildRawNavCsv(input: ExportBuilderInput): string {
     const bNav = benchmarkStatus.available ? (benchMap.get(d) ?? '') : 'Unavailable';
     const fundNavs = fundMaps.map((fm) => {
       if (!fm.usable) return '"Unavailable"';
-      const nav = fm.map.get(d);
+      const nav = fm.adjustedMap.get(d);
       return nav !== undefined ? nav : '';
     });
-    return [d, bNav, ...fundNavs].join(',');
+    const rawSplitNavs = splitAdjustedStates.map((s) => {
+      const idx = effectiveStates.indexOf(s);
+      const nav = fundMaps[idx]?.rawMap.get(d);
+      return nav !== undefined ? nav : '';
+    });
+    return [d, bNav, ...fundNavs, ...rawSplitNavs].join(',');
   });
 
   return [...provenance, headers.join(','), ...rows].join('\n');
@@ -782,10 +920,12 @@ interface DataExportModalProps {
   riskMetrics: RiskMetrics[];
   trailingMetaMap: Record<number, TrailingCagrResult>;
   seriesMap: Record<number, NavPoint[]>;
+  rawSeriesMap?: Record<number, NavPoint[]>;
   validationMap: Record<number, NavValidationReport | undefined>;
   identityMap?: Record<number, SchemeIdentityAudit | undefined>;
   holdingsOverlap?: OverlapMatrixResult;
   benchmarkStatus: BenchmarkStatus;
+  schemeDefaultBenchmarks?: Record<number, BenchmarkStatus>;
   rfRate: number;
 }
 
@@ -796,10 +936,12 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
   riskMetrics,
   trailingMetaMap,
   seriesMap,
+  rawSeriesMap,
   validationMap,
   identityMap,
   holdingsOverlap,
   benchmarkStatus,
+  schemeDefaultBenchmarks,
   rfRate,
 }) => {
   const [downloadSuccess, setDownloadSuccess] = useState<string | null>(null);
@@ -853,10 +995,12 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
     riskMetrics,
     trailingMetaMap,
     seriesMap,
+    rawSeriesMap,
     validationMap,
     identityMap,
     holdingsOverlap,
     benchmarkStatus,
+    schemeDefaultBenchmarks,
     rfRate,
   };
 
