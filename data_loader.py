@@ -31,7 +31,7 @@ PRESET_FUNDS: Dict[str, Dict[str, Any]] = {
         "fund_house": "PPFAS Mutual Fund",
         "benchmark": "^CRSLDX",
         "isin": "INF879O01027",
-        "aum_cr": 74200.0,
+        "aum_cr": 145070.50,
         "expense_ratio": 0.61,
         "manager": "Rajeev Thakkar",
         "macaulay_duration": 0.0,
@@ -44,7 +44,7 @@ PRESET_FUNDS: Dict[str, Dict[str, Any]] = {
         "fund_house": "Motilal Oswal AMC",
         "benchmark": "NIFTYMIDCAP150.NS",
         "isin": "INF247L01646",
-        "aum_cr": 19400.0,
+        "aum_cr": 42851.59,
         "expense_ratio": 0.68,
         "manager": "Niket Shah",
         "macaulay_duration": 0.0,
@@ -57,7 +57,7 @@ PRESET_FUNDS: Dict[str, Dict[str, Any]] = {
         "fund_house": "HDFC Mutual Fund",
         "benchmark": "^NSEI",
         "isin": "INF179K01BE2",
-        "aum_cr": 37800.0,
+        "aum_cr": 43250.0,
         "expense_ratio": 1.05,
         "manager": "Rahul Baijal",
         "macaulay_duration": 0.0,
@@ -213,37 +213,8 @@ def fetch_fund_nav_mfapi(scheme_code: int or str) -> pd.DataFrame:
                 df = df.drop_duplicates(subset=["date"])
                 if len(df) > 0:
                     return df[["scheme_code", "date", "nav"]]
-    except Exception as e:
-        logger.warning(f"Live fetch failed for scheme {scheme_code}: {e}")
-        
-    return _generate_calibrated_fund_series(int(code_str))
-
-
-def _generate_calibrated_fund_series(scheme_code: int, years: int = 12) -> pd.DataFrame:
-    """Generate 12-year calibrated historical mutual fund series."""
-    np.random.seed(scheme_code % 10000)
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=int(years * 365.25))
-    dates = pd.bdate_range(start=start_date, end=end_date)
-    
-    cagr_map = {
-        122639: 0.185, 127042: 0.225, 118989: 0.152, 118778: 0.245,
-        119598: 0.148, 120503: 0.076, 120586: 0.138, 118753: 0.122, 145552: 0.210
-    }
-    vol_map = {
-        122639: 0.135, 127042: 0.175, 118989: 0.140, 118778: 0.205,
-        119598: 0.135, 120503: 0.028, 120586: 0.095, 118753: 0.140, 145552: 0.220
-    }
-    
-    mu = cagr_map.get(scheme_code, 0.15)
-    sigma = vol_map.get(scheme_code, 0.15)
-    dt = 1.0 / 252.0
-    
-    daily_returns = np.random.normal((mu - 0.5 * sigma**2) * dt, sigma * np.sqrt(dt), len(dates))
-    base_nav = 10.0 if scheme_code != 120503 else 18.0
-    nav_series = base_nav * np.exp(np.cumsum(daily_returns))
-    
-    return pd.DataFrame({"scheme_code": scheme_code, "date": dates, "nav": nav_series})
+    logger.error(f"Live NAV fetch failed for scheme {scheme_code}. Zero-synthetic policy enforced; data flagged as unavailable.")
+    return pd.DataFrame(columns=["scheme_code", "date", "nav"])
 
 
 @cache_decorator

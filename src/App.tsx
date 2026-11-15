@@ -146,10 +146,11 @@ export default function App() {
     };
   }, [selectedCodes, timeHorizon]);
 
-  // Benchmark Series
+  // Benchmark Series: aligned to lead fund's authentic business calendar
   const benchmarkSeries = useMemo(() => {
-    return generateBenchmarkSeries(benchmarkSymbol, 12);
-  }, [benchmarkSymbol]);
+    const leadSeries = selectedCodes[0] ? fundSeriesMap[selectedCodes[0]] : undefined;
+    return generateBenchmarkSeries(benchmarkSymbol, leadSeries);
+  }, [benchmarkSymbol, selectedCodes, fundSeriesMap]);
 
   const activeBenchmark = useMemo(() => {
     return BENCHMARKS.find((b) => b.symbol === benchmarkSymbol) || BENCHMARKS[0];

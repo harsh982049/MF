@@ -11,6 +11,28 @@ import {
 } from '../types/quant';
 
 /**
+ * Checks whether a portfolio holding is cash, TREPS collateral, or sovereign liquidity buffer.
+ * Used to universally exclude cash from stock overlap calculations across all mutual funds.
+ */
+export function isCashEquivalentHolding(h: FundHolding): boolean {
+  if (!h) return false;
+  const isin = (h.isin || '').trim().toUpperCase();
+  const name = (h.name || '').toLowerCase();
+  const mcap = (h.mcap || '').toLowerCase();
+  return (
+    isin === 'CASH_EQUIV' ||
+    isin.startsWith('CASH') ||
+    isin === 'TREPS' ||
+    isin.startsWith('TREPS') ||
+    name.includes('treps') ||
+    name.includes('cash collateral') ||
+    name.includes('short-term collateral') ||
+    name.includes('cash & cash equivalent') ||
+    mcap.includes('cash')
+  );
+}
+
+/**
  * Annualized CAGR for specific periods: (P_end / P_start) ** (1 / years) - 1
  * Supports sub-annual periods (3M = 0.25Y, 6M = 0.5Y, 1Y, 3Y, 5Y, 7Y, 10Y)
  */
@@ -32,7 +54,6 @@ export function computeTrailingCagr(
 
     const targetDays = yrs * 365.25;
     if (totalDaysAvailable < targetDays * 0.85) {
-      // Fund does not have enough history for this period -> N/A
       result[label] = undefined;
       continue;
     }
@@ -50,11 +71,9 @@ export function computeTrailingCagr(
 
     if (startPoint && startPoint.nav > 0 && endPoint.nav > 0) {
       if (yrs < 1.0) {
-        // Absolute return for sub-annual periods (3M, 6M)
         const absReturn = (endPoint.nav - startPoint.nav) / startPoint.nav;
         result[label] = Number((absReturn * 100).toFixed(2));
       } else {
-        // Annualized CAGR for >= 1 year
         const cagr = Math.pow(endPoint.nav / startPoint.nav, 1.0 / yrs) - 1.0;
         result[label] = Number((cagr * 100).toFixed(2));
       }
@@ -67,7 +86,7 @@ export function computeTrailingCagr(
 }
 
 /**
- * Full Rolling Returns Distribution (1Y, 3Y, 5Y, etc.)
+ * Full Rolling Returns Distribution (1Y, 3Y, 5Y, 7Y, etc.)
  */
 export function computeRollingReturns(
   series: NavPoint[],
@@ -168,7 +187,32 @@ export function computeBenchmarkHitRate(
 }
 
 /**
+ * Synchronizes fund and benchmark time series via a strict inner date join.
+ * Ensures pairwise calculations are evaluated on identical business days with zero forward-filling.
+ */
+export function alignFundAndBenchmarkSeries(
+  fundSeries: NavPoint[],
+  benchSeries: NavPoint[]
+): { date: string; fNav: number; bNav: number }[] {
+  if (!fundSeries?.length || !benchSeries?.length) return [];
+
+  const benchMap = new Map(benchSeries.map((p) => [p.date, p.nav]));
+  const aligned: { date: string; fNav: number; bNav: number }[] = [];
+
+  const sortedFund = [...fundSeries].sort((a, b) => a.date.localeCompare(b.date));
+  for (const f of sortedFund) {
+    const bNav = benchMap.get(f.date);
+    if (bNav !== undefined && bNav > 0 && f.nav > 0) {
+      aligned.push({ date: f.date, fNav: f.nav, bNav });
+    }
+  }
+
+  return aligned;
+}
+
+/**
  * Comprehensive Risk & Active Alpha Metrics
+ * Strict inner-join synchronous business day evaluation.
  */
 export function computeComprehensiveMetrics(
   fundSeries: NavPoint[],
@@ -203,18 +247,7 @@ export function computeComprehensiveMetrics(
     recoveryDate: '',
   };
 
-  if (!fundSeries.length || !benchSeries.length) return empty;
-
-  const benchMap = new Map(benchSeries.map((p) => [p.date, p.nav]));
-  const aligned: { date: string; fNav: number; bNav: number }[] = [];
-
-  for (const f of fundSeries) {
-    const bNav = benchMap.get(f.date);
-    if (bNav !== undefined) {
-      aligned.push({ date: f.date, fNav: f.nav, bNav });
-    }
-  }
-
+  const aligned = alignFundAndBenchmarkSeries(fundSeries, benchSeries);
   if (aligned.length < 20) return empty;
 
   const fReturns: number[] = [];
@@ -268,7 +301,7 @@ export function computeComprehensiveMetrics(
   const trackingError = Math.sqrt(excessVar) * Math.sqrt(252);
   const informationRatio = trackingError > 1e-6 ? (fAnnReturn - bAnnReturn) / trackingError : 0;
 
-  // Max Drawdown & Recovery
+  // Max Drawdown & Recovery on genuine business days
   let runningMax = -Infinity;
   let maxDd = 0;
   let maxDdIdx = 0;
@@ -314,7 +347,7 @@ export function computeComprehensiveMetrics(
 
   const calmarRatio = Math.abs(maxDd) > 1e-4 ? fAnnReturn / Math.abs(maxDd) : 0;
 
-  // Upside / Downside Capture
+  // Upside / Downside Capture Ratios
   let upFundSum = 0, upBenchSum = 0;
   let downFundSum = 0, downBenchSum = 0;
   for (let i = 0; i < n; i++) {
@@ -326,8 +359,9 @@ export function computeComprehensiveMetrics(
       downBenchSum += bReturns[i];
     }
   }
-  const upsideCapture = upBenchSum !== 0 ? (upFundSum / upBenchSum) * 100 : 100;
-  const downsideCapture = downBenchSum !== 0 ? (downFundSum / downBenchSum) * 100 : 100;
+
+  const upsideCapture = Math.abs(upBenchSum) > 1e-6 ? (upFundSum / upBenchSum) * 100 : 100;
+  const downsideCapture = Math.abs(downBenchSum) > 1e-6 ? (downFundSum / downBenchSum) * 100 : 100;
 
   return {
     fundName,
@@ -538,6 +572,11 @@ export function computeReturnCorrelationMatrix(
   };
 }
 
+/**
+ * Computes pairwise stock-level portfolio overlap between two funds.
+ * STRICT POLICY: Excludes cash collateral, TREPS, and money market instruments by default,
+ * ensuring overlap score reflects true corporate common equity holdings.
+ */
 export function computePairwiseOverlap(
   holdingsA: FundHolding[],
   holdingsB: FundHolding[],
@@ -545,15 +584,13 @@ export function computePairwiseOverlap(
 ): number {
   if (!holdingsA?.length || !holdingsB?.length) return 0;
 
-  const mapB = new Map(
-    holdingsB
-      .filter((h) => !excludeCash || h.isin !== 'CASH_EQUIV')
-      .map((h) => [h.isin, h.weight])
-  );
+  const validA = holdingsA.filter((h) => !excludeCash || !isCashEquivalentHolding(h));
+  const validB = holdingsB.filter((h) => !excludeCash || !isCashEquivalentHolding(h));
+
+  const mapB = new Map(validB.map((h) => [h.isin, h.weight]));
 
   let overlap = 0;
-  for (const hA of holdingsA) {
-    if (excludeCash && hA.isin === 'CASH_EQUIV') continue;
+  for (const hA of validA) {
     const wB = mapB.get(hA.isin);
     if (wB !== undefined) {
       overlap += Math.min(hA.weight, wB);
@@ -563,6 +600,10 @@ export function computePairwiseOverlap(
   return Number(overlap.toFixed(2));
 }
 
+/**
+ * Full N x N Portfolio Overlap Matrix across selected funds.
+ * Excludes cash and TREPS placeholders.
+ */
 export function computeOverlapMatrix(
   funds: { scheme_code: number; name: string; holdings: FundHolding[] }[]
 ): { names: string[]; matrix: number[][] } {
@@ -575,7 +616,7 @@ export function computeOverlapMatrix(
       if (i === j) {
         matrix[i][j] = 100.0;
       } else if (i < j) {
-        const ov = computePairwiseOverlap(funds[i].holdings, funds[j].holdings);
+        const ov = computePairwiseOverlap(funds[i].holdings, funds[j].holdings, true);
         matrix[i][j] = ov;
         matrix[j][i] = ov;
       }
@@ -656,7 +697,8 @@ export function calculateLiquidityStress(
   const analyzed = holdings.map((h) => {
     const positionCr = (h.weight / 100.0) * aumCrores;
     const dailyAbsorbable = h.adtv_cr * participationRate;
-    const days = h.isin === 'CASH_EQUIV' ? 0.0 : positionCr / Math.max(dailyAbsorbable, 0.1);
+    const isCash = isCashEquivalentHolding(h);
+    const days = isCash ? 0.0 : positionCr / Math.max(dailyAbsorbable, 0.1);
     return {
       isin: h.isin,
       name: h.name,
@@ -667,7 +709,7 @@ export function calculateLiquidityStress(
     };
   });
 
-  const nonCash = analyzed.filter((h) => h.isin !== 'CASH_EQUIV');
+  const nonCash = analyzed.filter((h) => !isCashEquivalentHolding({ ...h, adtv_cr: h.adtvCr, sector: '', mcap: 'Large Cap' }));
   const maxDays = Math.max(...nonCash.map((h) => h.daysToLiquidate), 1.0);
   const days25Prorata = Number((maxDays * 0.25).toFixed(1));
   const days50Prorata = Number((maxDays * 0.50).toFixed(1));

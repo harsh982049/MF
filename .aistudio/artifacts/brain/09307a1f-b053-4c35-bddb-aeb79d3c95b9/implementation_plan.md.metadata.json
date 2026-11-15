@@ -1,6 +1,0 @@
-{
-  "summary":  "Architectural implementation plan to integrate all mfapi.in endpoints (/mf/search, /mf with pagination, /mf/{scheme_code}, /mf/{scheme_code}/latest), unlocking the entire universe of over 38,000 Indian mutual fund schemes in the dashboard with live search, paginated directory browsing, category-aligned holdings synthesis, and automatic benchmark mapping.",
-  "updatedAt":  "2026-11-09T18:28:01.417191303Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

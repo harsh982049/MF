@@ -55,6 +55,8 @@ export interface FundMeta {
   credit_profile?: CreditProfile;
 
   holdings: FundHolding[];
+  asOfDate?: string;
+  isStatutoryDisclosure?: boolean;
 }
 
 export interface NavPoint {

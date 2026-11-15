@@ -19,7 +19,7 @@ SAMPLE_FUND_HOLDINGS: Dict[int, List[Dict[str, Any]]] = {
         {"isin": "INE040A01034", "name": "HDFC Bank Ltd", "sector": "Financial Services", "mcap": "Large Cap", "weight": 8.45, "adtv_cr": 2450.0},
         {"isin": "INE018A01030", "name": "Larsen & Toubro Ltd", "sector": "Industrials", "mcap": "Large Cap", "weight": 7.30, "adtv_cr": 820.0},
         {"isin": "INE090A01021", "name": "ICICI Bank Ltd", "sector": "Financial Services", "mcap": "Large Cap", "weight": 6.85, "adtv_cr": 1850.0},
-        {"isin": "INE118A01012", "name": "ITC Ltd", "sector": "Consumer Goods", "mcap": "Large Cap", "weight": 6.10, "adtv_cr": 780.0},
+        {"isin": "INE154A01025", "name": "ITC Ltd", "sector": "Consumer Goods", "mcap": "Large Cap", "weight": 5.49, "adtv_cr": 780.0},
         {"isin": "INE296A01024", "name": "Bajaj Holdings & Inv Ltd", "sector": "Financial Services", "mcap": "Large Cap", "weight": 5.75, "adtv_cr": 110.0},
         {"isin": "INE745G01035", "name": "Power Grid Corp of India", "sector": "Utilities", "mcap": "Large Cap", "weight": 5.40, "adtv_cr": 480.0},
         {"isin": "INE009A01021", "name": "Infosys Ltd", "sector": "Technology", "mcap": "Large Cap", "weight": 4.90, "adtv_cr": 1420.0},
@@ -108,7 +108,7 @@ SAMPLE_FUND_HOLDINGS: Dict[int, List[Dict[str, Any]]] = {
         {"isin": "INE002A01018", "name": "Reliance Industries Ltd", "sector": "Energy", "mcap": "Large Cap", "weight": 7.90, "adtv_cr": 2100.0},
         {"isin": "INE009A01021", "name": "Infosys Ltd", "sector": "Technology", "mcap": "Large Cap", "weight": 6.80, "adtv_cr": 1420.0},
         {"isin": "INE018A01030", "name": "Larsen & Toubro Ltd", "sector": "Industrials", "mcap": "Large Cap", "weight": 5.90, "adtv_cr": 820.0},
-        {"isin": "INE118A01012", "name": "ITC Ltd", "sector": "Consumer Goods", "mcap": "Large Cap", "weight": 4.50, "adtv_cr": 780.0},
+        {"isin": "INE154A01025", "name": "ITC Ltd", "sector": "Consumer Goods", "mcap": "Large Cap", "weight": 4.50, "adtv_cr": 780.0},
         {"isin": "INE467B01029", "name": "Tata Consultancy Services", "sector": "Technology", "mcap": "Large Cap", "weight": 4.30, "adtv_cr": 980.0},
         {"isin": "INE062A01020", "name": "State Bank of India", "sector": "Financial Services", "mcap": "Large Cap", "weight": 4.20, "adtv_cr": 1650.0},
         {"isin": "INE238A01034", "name": "Axis Bank Ltd", "sector": "Financial Services", "mcap": "Large Cap", "weight": 3.80, "adtv_cr": 1150.0},
@@ -165,8 +165,20 @@ def compute_pairwise_overlap(
     df_b = holdings_b.copy()
 
     if exclude_cash:
-        df_a = df_a[df_a["isin"] != "CASH_EQUIV"]
-        df_b = df_b[df_b["isin"] != "CASH_EQUIV"]
+        def is_cash(row):
+            isin = str(row.get("isin", "")).upper()
+            name = str(row.get("name", "")).lower()
+            mcap = str(row.get("mcap", "")).lower()
+            return (
+                isin in ["CASH_EQUIV", "TREPS"] or
+                isin.startswith("CASH") or
+                isin.startswith("TREPS") or
+                "treps" in name or
+                "cash collateral" in name or
+                "cash" in mcap
+            )
+        df_a = df_a[~df_a.apply(is_cash, axis=1)]
+        df_b = df_b[~df_b.apply(is_cash, axis=1)]
 
     merged = pd.merge(df_a, df_b, on="isin", suffixes=("_a", "_b"))
     if merged.empty:
