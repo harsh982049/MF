@@ -9,7 +9,26 @@ interface BubbleScatterProps {
 }
 
 export const BubbleScatterPlot: React.FC<BubbleScatterProps> = ({ metrics }) => {
-  if (!metrics.length) return null;
+  const validMetrics = metrics.filter(
+    (m) =>
+      m.benchmarkRelativeAvailable &&
+      m.beta !== null &&
+      m.jensensAlpha !== null
+  );
+
+  if (!validMetrics.length) {
+    const reason =
+      metrics.find((m) => m.unavailableReasons?.benchmark)?.unavailableReasons.benchmark ||
+      'Unavailable: Independent verified benchmark series required to compute Beta and Jensen’s Alpha.';
+    return (
+      <div className="p-8 bg-slate-950/80 border border-slate-800 rounded-xl text-center space-y-1.5">
+        <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+          Beta vs. Jensen&apos;s Alpha — Unavailable
+        </div>
+        <div className="text-xs text-slate-500 max-w-md mx-auto">{reason}</div>
+      </div>
+    );
+  }
 
   const width = 640;
   const height = 320;
@@ -26,20 +45,21 @@ export const BubbleScatterPlot: React.FC<BubbleScatterProps> = ({ metrics }) => 
   let minAlpha = -4;
   let maxAlpha = 8;
 
-  metrics.forEach((m) => {
-    if (m.beta < minBeta) minBeta = Math.floor(m.beta * 10) / 10;
-    if (m.beta > maxBeta) maxBeta = Math.ceil(m.beta * 10) / 10;
-    if (m.jensensAlpha < minAlpha) minAlpha = Math.floor(m.jensensAlpha);
-    if (m.jensensAlpha > maxAlpha) maxAlpha = Math.ceil(m.jensensAlpha);
+  validMetrics.forEach((m) => {
+    const b = m.beta!;
+    const a = m.jensensAlpha!;
+    if (b < minBeta) minBeta = Math.floor(b * 10) / 10;
+    if (b > maxBeta) maxBeta = Math.ceil(b * 10) / 10;
+    if (a < minAlpha) minAlpha = Math.floor(a);
+    if (a > maxAlpha) maxAlpha = Math.ceil(a);
   });
 
-  const getX = (b: number) => padL + ((b - minBeta) / (maxBeta - minBeta)) * chartW;
-  const getY = (a: number) => padT + chartH - ((a - minAlpha) / (maxAlpha - minAlpha)) * chartH;
+  const getX = (b: number) => padL + ((b - minBeta) / Math.max(0.1, maxBeta - minBeta)) * chartW;
+  const getY = (a: number) => padT + chartH - ((a - minAlpha) / Math.max(0.1, maxAlpha - minAlpha)) * chartH;
 
   return (
     <div className="w-full bg-slate-950/80 border border-slate-800 rounded-xl p-4 font-sans">
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto select-none">
-        {/* Zero Alpha Line */}
         <line
           x1={padL}
           y1={getY(0)}
@@ -49,7 +69,6 @@ export const BubbleScatterPlot: React.FC<BubbleScatterProps> = ({ metrics }) => 
           strokeWidth="1.2"
           strokeDasharray="4 4"
         />
-        {/* Unit Beta Line */}
         <line
           x1={getX(1.0)}
           y1={padT}
@@ -64,11 +83,13 @@ export const BubbleScatterPlot: React.FC<BubbleScatterProps> = ({ metrics }) => 
           Benchmark (β=1.0, α=0%)
         </text>
 
-        {metrics.map((m) => {
-          const cx = getX(m.beta);
-          const cy = getY(m.jensensAlpha);
-          const radius = Math.max(8, Math.min(26, Math.abs(m.informationRatio) * 14 + 6));
-          const color = m.sharpe > 1.2 ? '#10b981' : m.sharpe > 0.8 ? '#38bdf8' : '#f59e0b';
+        {validMetrics.map((m) => {
+          const cx = getX(m.beta!);
+          const cy = getY(m.jensensAlpha!);
+          const irVal = m.informationRatio ?? 0;
+          const radius = Math.max(8, Math.min(26, Math.abs(irVal) * 14 + 6));
+          const sharpeVal = m.sharpe ?? 0;
+          const color = sharpeVal > 1.2 ? '#10b981' : sharpeVal > 0.8 ? '#38bdf8' : '#f59e0b';
 
           return (
             <g key={m.schemeCode} className="cursor-pointer group">
@@ -90,7 +111,7 @@ export const BubbleScatterPlot: React.FC<BubbleScatterProps> = ({ metrics }) => 
                 fontSize="11"
                 fontWeight="600"
               >
-                {m.fundName.split(' ')[0]} (IR: {m.informationRatio})
+                {m.fundName.split(' ')[0]} (IR: {m.informationRatio ?? 'Unavailable'})
               </text>
             </g>
           );
@@ -127,17 +148,35 @@ export const BubbleScatterPlot: React.FC<BubbleScatterProps> = ({ metrics }) => 
 };
 
 /**
- * Dynamic Pairwise ISIN Overlap Heatmap
+ * Dynamic Pairwise ISIN Overlap Heatmap (Null-safe; preserves genuine 0.0%)
  */
 interface OverlapHeatmapProps {
+  available: boolean;
+  reason?: string | null;
   names: string[];
-  matrix: number[][];
+  matrix: (number | null)[][];
 }
 
-export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({ names, matrix }) => {
+export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({
+  available,
+  reason,
+  names,
+  matrix,
+}) => {
   const [hoveredCell, setHoveredCell] = useState<{ r: number; c: number } | null>(null);
 
-  if (!names.length || !matrix.length) return null;
+  if (!available || !names.length || !matrix.length) {
+    return (
+      <div className="p-6 bg-slate-950/80 border border-slate-800 rounded-xl text-center space-y-1.5">
+        <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+          ISIN Overlap Matrix — Unavailable
+        </div>
+        <div className="text-xs text-slate-500">
+          {reason || 'Unavailable: Verified non-cash security holdings are required for overlap analysis.'}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="overflow-x-auto bg-slate-950/80 border border-slate-800 rounded-xl p-4 font-sans">
@@ -163,13 +202,16 @@ export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({ names, matrix })
                 </td>
                 {matrix[r].map((val, c) => {
                   const isDiag = r === c;
-                  const bgStyle = isDiag
-                    ? 'bg-slate-800 text-slate-400'
-                    : val > 40
-                    ? 'bg-rose-950/60 text-rose-300 border border-rose-900/60 font-semibold'
-                    : val > 25
-                    ? 'bg-amber-950/50 text-amber-300 border border-amber-900/50'
-                    : 'bg-emerald-950/40 text-emerald-300 border border-emerald-900/40';
+                  const bgStyle =
+                    val === null
+                      ? 'bg-slate-900/80 text-slate-500'
+                      : isDiag
+                      ? 'bg-slate-800 text-slate-400'
+                      : val > 40
+                      ? 'bg-rose-950/60 text-rose-300 border border-rose-900/60 font-semibold'
+                      : val > 25
+                      ? 'bg-amber-950/50 text-amber-300 border border-amber-900/50'
+                      : 'bg-emerald-950/40 text-emerald-300 border border-emerald-900/40';
 
                   return (
                     <td
@@ -178,7 +220,7 @@ export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({ names, matrix })
                       onMouseEnter={() => setHoveredCell({ r, c })}
                       onMouseLeave={() => setHoveredCell(null)}
                     >
-                      <span>{val.toFixed(1)}%</span>
+                      <span>{val !== null ? `${val.toFixed(1)}%` : 'Unavailable'}</span>
                     </td>
                   );
                 })}
@@ -200,7 +242,9 @@ export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({ names, matrix })
             <span className="font-semibold">{names[hoveredCell.r].split(' ')[0]}</span> &amp;{' '}
             <span className="font-semibold">{names[hoveredCell.c].split(' ')[0]}</span>: Overlap{' '}
             <span className="font-mono font-bold text-amber-300">
-              {matrix[hoveredCell.r][hoveredCell.c].toFixed(1)}%
+              {matrix[hoveredCell.r][hoveredCell.c] !== null
+                ? `${matrix[hoveredCell.r][hoveredCell.c]!.toFixed(1)}%`
+                : 'Unavailable'}
             </span>
           </div>
         )}

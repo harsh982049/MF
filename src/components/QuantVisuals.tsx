@@ -3,12 +3,14 @@ import { RollingDistribution, RiskMetrics, SipSimulationResult } from '../types/
 
 /**
  * Rebased Cumulative Performance Line Chart (Base = 100)
- * Expanded Viewport (Height 420px) with Responsive Grid and Multi-Fund Tracking
+ * Continues to plot validated fund lines cleanly even when Benchmark is Unavailable.
  */
 interface PerformanceChartProps {
   seriesMap: Record<string, { date: string; nav: number }[]>;
   benchSeries: { date: string; nav: number }[];
   benchName: string;
+  benchAvailable: boolean;
+  benchReason?: string | null;
   colors: string[];
 }
 
@@ -16,50 +18,67 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
   seriesMap,
   benchSeries,
   benchName,
+  benchAvailable,
+  benchReason,
   colors,
 }) => {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
-  const fundKeys = Object.keys(seriesMap);
-  if (fundKeys.length === 0 || !benchSeries.length) {
-    return <div className="p-8 text-center text-slate-500">No performance series available</div>;
+  const fundKeys = Object.keys(seriesMap).filter((k) => seriesMap[k] && seriesMap[k].length > 0);
+  const hasBench = benchAvailable && benchSeries && benchSeries.length > 0;
+
+  if (fundKeys.length === 0 && !hasBench) {
+    return (
+      <div className="p-8 bg-slate-950/80 border border-slate-800 rounded-xl text-center space-y-1">
+        <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+          Performance Chart — Unavailable
+        </div>
+        <div className="text-xs text-slate-500">
+          {benchReason || 'No validated fund or benchmark series available in selected horizon.'}
+        </div>
+      </div>
+    );
   }
 
-  const normBench = benchSeries.map((p) => ({
-    date: p.date,
-    val: (p.nav / benchSeries[0].nav) * 100,
-  }));
+  // Build master date axis from benchmark (if available) + all fund series
+  const allDatesSet = new Set<string>();
+  if (hasBench) benchSeries.forEach((p) => allDatesSet.add(p.date));
+  fundKeys.forEach((k) => seriesMap[k].forEach((p) => allDatesSet.add(p.date)));
+  const dates = Array.from(allDatesSet).sort();
 
-  const normFunds: Record<string, { date: string; val: number }[]> = {};
+  const normBenchMap = new Map<string, number>();
+  if (hasBench) {
+    const baseB = benchSeries[0].nav;
+    benchSeries.forEach((p) => normBenchMap.set(p.date, (p.nav / baseB) * 100));
+  }
+
+  const normFundMaps: Record<string, Map<string, number>> = {};
   fundKeys.forEach((k) => {
     const s = seriesMap[k];
-    if (s && s.length > 0) {
-      const base = s[0].nav;
-      normFunds[k] = s.map((p) => ({
-        date: p.date,
-        val: (p.nav / base) * 100,
-      }));
-    }
+    const baseF = s[0].nav;
+    const m = new Map<string, number>();
+    s.forEach((p) => m.set(p.date, (p.nav / baseF) * 100));
+    normFundMaps[k] = m;
   });
 
   let minVal = 100;
   let maxVal = 100;
-  normBench.forEach((p) => {
-    if (p.val < minVal) minVal = p.val;
-    if (p.val > maxVal) maxVal = p.val;
+  normBenchMap.forEach((v) => {
+    if (v < minVal) minVal = v;
+    if (v > maxVal) maxVal = v;
   });
   fundKeys.forEach((k) => {
-    normFunds[k]?.forEach((p) => {
-      if (p.val < minVal) minVal = p.val;
-      if (p.val > maxVal) maxVal = p.val;
+    normFundMaps[k].forEach((v) => {
+      if (v < minVal) minVal = v;
+      if (v > maxVal) maxVal = v;
     });
   });
 
   minVal = Math.floor(Math.max(0, minVal * 0.95));
-  maxVal = Math.ceil(maxVal * 1.05);
+  maxVal = Math.ceil(Math.max(minVal + 10, maxVal * 1.05));
 
   const width = 880;
-  const height = 400; // Expanded height to eliminate cramped view
+  const height = 400;
   const padL = 55;
   const padR = 25;
   const padT = 25;
@@ -68,33 +87,48 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
   const chartW = width - padL - padR;
   const chartH = height - padT - padB;
 
-  const nPoints = normBench.length;
+  const nPoints = dates.length;
   const getX = (i: number) => padL + (i / Math.max(1, nPoints - 1)) * chartW;
   const getY = (v: number) => padT + chartH - ((v - minVal) / (maxVal - minVal)) * chartH;
 
-  const buildPath = (data: { val: number }[]) => {
-    if (!data.length) return '';
-    return data
-      .map((p, idx) => {
+  const buildPathFromMap = (valMap: Map<string, number>) => {
+    let dStr = '';
+    let started = false;
+    dates.forEach((dt, idx) => {
+      const val = valMap.get(dt);
+      if (val !== undefined) {
         const x = getX(idx);
-        const y = getY(p.val);
-        return `${idx === 0 ? 'M' : 'L'} ${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(' ');
+        const y = getY(val);
+        dStr += `${started ? 'L' : 'M'} ${x.toFixed(1)},${y.toFixed(1)} `;
+        started = true;
+      }
+    });
+    return dStr.trim();
   };
 
   const step = Math.round((maxVal - minVal) / 4);
   const yTicks = [minVal, minVal + step, minVal + 2 * step, minVal + 3 * step, maxVal];
   const activeIdx = hoverIndex !== null ? hoverIndex : nPoints - 1;
+  const activeDate = dates[activeIdx];
 
   return (
     <div className="relative w-full space-y-3 font-sans">
       <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-1.5">
-            <span className="w-4 h-0.5 bg-amber-400 border-b border-dashed border-amber-400 inline-block" />
-            <span className="text-amber-300 font-semibold">{benchName} (Benchmark)</span>
-          </div>
+          {hasBench ? (
+            <div className="flex items-center gap-1.5">
+              <span className="w-4 h-0.5 bg-amber-400 border-b border-dashed border-amber-400 inline-block" />
+              <span className="text-amber-300 font-semibold">{benchName} (Benchmark)</span>
+            </div>
+          ) : (
+            <div
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-amber-950/60 border border-amber-800/60 text-amber-300 text-[11px]"
+              title={benchReason || 'Benchmark unavailable'}
+            >
+              <span>Benchmark ({benchName}): Unavailable</span>
+            </div>
+          )}
+
           {fundKeys.map((k, idx) => (
             <div key={k} className="flex items-center gap-1.5">
               <span
@@ -106,16 +140,26 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
           ))}
         </div>
 
-        {activeIdx < nPoints && (
-          <div className="text-slate-300 font-mono text-xs bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 shadow-sm flex items-center gap-3">
-            <span>Date: {normBench[activeIdx]?.date}</span>
+        {activeDate && (
+          <div className="text-slate-300 font-mono text-xs bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 shadow-sm flex flex-wrap items-center gap-3">
+            <span>Date: {activeDate}</span>
             <span className="text-slate-600">|</span>
-            <span className="text-amber-400 font-semibold">Bench: {normBench[activeIdx]?.val.toFixed(1)}</span>
-            {fundKeys.map((k) => (
-              <span key={k} className="text-slate-300">
-                {k.split(' ')[0]}: <span className="font-semibold text-white">{normFunds[k]?.[activeIdx]?.val.toFixed(1)}</span>
+            {hasBench && (
+              <span className="text-amber-400 font-semibold">
+                Bench: {normBenchMap.get(activeDate)?.toFixed(1) ?? 'N/A'}
               </span>
-            ))}
+            )}
+            {fundKeys.map((k) => {
+              const v = normFundMaps[k].get(activeDate);
+              return (
+                <span key={k} className="text-slate-300">
+                  {k.split(' ')[0]}:{' '}
+                  <span className="font-semibold text-white">
+                    {v !== undefined ? v.toFixed(1) : '—'}
+                  </span>
+                </span>
+              );
+            })}
           </div>
         )}
       </div>
@@ -132,7 +176,6 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
           }}
           onMouseLeave={() => setHoverIndex(null)}
         >
-          {/* Y Axis Gridlines */}
           {yTicks.map((tick) => {
             const y = getY(tick);
             return (
@@ -160,7 +203,6 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
             );
           })}
 
-          {/* Base 100 Guideline */}
           <line
             x1={padL}
             y1={getY(100)}
@@ -170,20 +212,20 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
             strokeWidth="1.5"
           />
 
-          {/* Benchmark trace */}
-          <path
-            d={buildPath(normBench)}
-            fill="none"
-            stroke="#f59e0b"
-            strokeWidth="2.5"
-            strokeDasharray="6 3"
-          />
+          {hasBench && (
+            <path
+              d={buildPathFromMap(normBenchMap)}
+              fill="none"
+              stroke="#f59e0b"
+              strokeWidth="2.5"
+              strokeDasharray="6 3"
+            />
+          )}
 
-          {/* Fund traces */}
           {fundKeys.map((k, idx) => (
             <path
               key={k}
-              d={buildPath(normFunds[k] || [])}
+              d={buildPathFromMap(normFundMaps[k])}
               fill="none"
               stroke={colors[idx % colors.length]}
               strokeWidth="2.6"
@@ -191,7 +233,6 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
             />
           ))}
 
-          {/* Hover Crosshair */}
           {hoverIndex !== null && (
             <line
               x1={getX(hoverIndex)}
@@ -204,9 +245,8 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
             />
           )}
 
-          {/* X Axis dates */}
           <text x={padL} y={height - 12} fill="#64748b" fontSize="11" fontFamily="monospace">
-            {normBench[0]?.date}
+            {dates[0]}
           </text>
           <text
             x={width - padR}
@@ -216,7 +256,7 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
             fontSize="11"
             fontFamily="monospace"
           >
-            {normBench[normBench.length - 1]?.date}
+            {dates[dates.length - 1]}
           </text>
         </svg>
       </div>
@@ -225,22 +265,38 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
 };
 
 /**
- * 3Y/5Y Rolling Return Distribution Box Plots
+ * Rolling Return Distribution Box Plots
  */
 interface RollingBoxPlotProps {
   distributions: { name: string; dist: RollingDistribution; color: string }[];
 }
 
 export const RollingBoxPlot: React.FC<RollingBoxPlotProps> = ({ distributions }) => {
-  if (!distributions.length) {
-    return <div className="p-6 text-center text-slate-500">No rolling return series available</div>;
+  const validDistributions = distributions.filter(
+    (d) =>
+      d.dist.available &&
+      d.dist.count > 0 &&
+      d.dist.min !== null &&
+      d.dist.max !== null &&
+      d.dist.q25 !== null &&
+      d.dist.q75 !== null &&
+      d.dist.median !== null &&
+      d.dist.mean !== null
+  );
+
+  if (!validDistributions.length) {
+    return (
+      <div className="p-6 bg-slate-950/80 border border-slate-800 rounded-xl text-center text-xs text-slate-500">
+        Unavailable — No clean rolling return distributions available for the selected window.
+      </div>
+    );
   }
 
   let minVal = 0;
   let maxVal = 35;
-  distributions.forEach((d) => {
-    if (d.dist.min < minVal) minVal = d.dist.min;
-    if (d.dist.max > maxVal) maxVal = d.dist.max;
+  validDistributions.forEach((d) => {
+    if (d.dist.min! < minVal) minVal = d.dist.min!;
+    if (d.dist.max! > maxVal) maxVal = d.dist.max!;
   });
 
   minVal = Math.floor(minVal - 2);
@@ -256,16 +312,15 @@ export const RollingBoxPlot: React.FC<RollingBoxPlotProps> = ({ distributions })
   const chartW = width - padL - padR;
   const chartH = height - padT - padB;
 
-  const getY = (v: number) => padT + chartH - ((v - minVal) / (maxVal - minVal)) * chartH;
+  const getY = (v: number) => padT + chartH - ((v - minVal) / Math.max(1, maxVal - minVal)) * chartH;
   const yTicks = [minVal, 0, 10, 20, maxVal].filter((v, i, a) => a.indexOf(v) === i);
 
-  const slotW = chartW / distributions.length;
+  const slotW = chartW / validDistributions.length;
   const boxW = Math.min(54, slotW * 0.58);
 
   return (
     <div className="w-full bg-slate-950/80 border border-slate-800 rounded-xl p-4">
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto select-none">
-        {/* Y-axis Grid */}
         {yTicks.map((tick) => {
           const y = getY(tick);
           return (
@@ -293,47 +348,22 @@ export const RollingBoxPlot: React.FC<RollingBoxPlotProps> = ({ distributions })
           );
         })}
 
-        {/* Box Plots */}
-        {distributions.map((item, idx) => {
+        {validDistributions.map((item, idx) => {
           const d = item.dist;
           const centerX = padL + idx * slotW + slotW / 2;
-          const yMin = getY(d.min);
-          const yMax = getY(d.max);
-          const yQ25 = getY(d.q25);
-          const yQ75 = getY(d.q75);
-          const yMedian = getY(d.median);
-          const yMean = getY(d.mean);
+          const yMin = getY(d.min!);
+          const yMax = getY(d.max!);
+          const yQ25 = getY(d.q25!);
+          const yQ75 = getY(d.q75!);
+          const yMedian = getY(d.median!);
+          const yMean = getY(d.mean!);
 
           return (
             <g key={item.name} className="group cursor-pointer">
-              {/* Whiskers */}
-              <line
-                x1={centerX}
-                y1={yMax}
-                x2={centerX}
-                y2={yMin}
-                stroke={item.color}
-                strokeWidth="1.6"
-                opacity="0.8"
-              />
-              <line
-                x1={centerX - boxW * 0.3}
-                y1={yMax}
-                x2={centerX + boxW * 0.3}
-                y2={yMax}
-                stroke={item.color}
-                strokeWidth="1.6"
-              />
-              <line
-                x1={centerX - boxW * 0.3}
-                y1={yMin}
-                x2={centerX + boxW * 0.3}
-                y2={yMin}
-                stroke={item.color}
-                strokeWidth="1.6"
-              />
+              <line x1={centerX} y1={yMax} x2={centerX} y2={yMin} stroke={item.color} strokeWidth="1.6" opacity="0.8" />
+              <line x1={centerX - boxW * 0.3} y1={yMax} x2={centerX + boxW * 0.3} y2={yMax} stroke={item.color} strokeWidth="1.6" />
+              <line x1={centerX - boxW * 0.3} y1={yMin} x2={centerX + boxW * 0.3} y2={yMin} stroke={item.color} strokeWidth="1.6" />
 
-              {/* IQR Box */}
               <rect
                 x={centerX - boxW / 2}
                 y={yQ75}
@@ -346,29 +376,10 @@ export const RollingBoxPlot: React.FC<RollingBoxPlotProps> = ({ distributions })
                 rx="3"
               />
 
-              {/* Median Line */}
-              <line
-                x1={centerX - boxW / 2}
-                y1={yMedian}
-                x2={centerX + boxW / 2}
-                y2={yMedian}
-                stroke="#ffffff"
-                strokeWidth="2.5"
-              />
-
-              {/* Mean marker */}
+              <line x1={centerX - boxW / 2} y1={yMedian} x2={centerX + boxW / 2} y2={yMedian} stroke="#ffffff" strokeWidth="2.5" />
               <circle cx={centerX} cy={yMean} r="3.5" fill="#fbbf24" stroke="#000" strokeWidth="0.8" />
 
-              {/* Label */}
-              <text
-                x={centerX}
-                y={height - 12}
-                textAnchor="middle"
-                fill="#94a3b8"
-                fontSize="11"
-                fontFamily="sans-serif"
-                fontWeight="500"
-              >
+              <text x={centerX} y={height - 12} textAnchor="middle" fill="#94a3b8" fontSize="11" fontFamily="sans-serif" fontWeight="500">
                 {item.name.length > 15 ? item.name.slice(0, 14) + '..' : item.name}
               </text>
             </g>
@@ -401,7 +412,26 @@ interface CaptureRatioProps {
 }
 
 export const CaptureRatioQuadrant: React.FC<CaptureRatioProps> = ({ metrics }) => {
-  if (!metrics.length) return null;
+  const validMetrics = metrics.filter(
+    (m) =>
+      m.benchmarkRelativeAvailable &&
+      m.upsideCapture !== null &&
+      m.downsideCapture !== null
+  );
+
+  if (!validMetrics.length) {
+    const reason =
+      metrics.find((m) => m.unavailableReasons?.benchmark)?.unavailableReasons.benchmark ||
+      'Unavailable: Independent verified benchmark series required to compute capture ratios.';
+    return (
+      <div className="p-8 bg-slate-950/80 border border-slate-800 rounded-xl text-center space-y-1.5">
+        <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+          Capture Ratio Quadrant — Unavailable
+        </div>
+        <div className="text-xs text-slate-500 max-w-md mx-auto">{reason}</div>
+      </div>
+    );
+  }
 
   const width = 640;
   const height = 320;
@@ -424,27 +454,9 @@ export const CaptureRatioQuadrant: React.FC<CaptureRatioProps> = ({ metrics }) =
   return (
     <div className="w-full bg-slate-950/80 border border-slate-800 rounded-xl p-4 font-sans">
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto select-none">
-        {/* 100% Benchmark Crosshairs */}
-        <line
-          x1={padL}
-          y1={getY(100)}
-          x2={width - padR}
-          y2={getY(100)}
-          stroke="#475569"
-          strokeWidth="1.2"
-          strokeDasharray="4 4"
-        />
-        <line
-          x1={getX(100)}
-          y1={padT}
-          x2={getX(100)}
-          y2={height - padB}
-          stroke="#475569"
-          strokeWidth="1.2"
-          strokeDasharray="4 4"
-        />
+        <line x1={padL} y1={getY(100)} x2={width - padR} y2={getY(100)} stroke="#475569" strokeWidth="1.2" strokeDasharray="4 4" />
+        <line x1={getX(100)} y1={padT} x2={getX(100)} y2={height - padB} stroke="#475569" strokeWidth="1.2" strokeDasharray="4 4" />
 
-        {/* Quadrant Highlights */}
         <text x={padL + 12} y={padT + 18} fill="#10b981" fontSize="10" fontWeight="700">
           ★ Ideal: High Upside (&gt;100%), Low Downside (&lt;100%)
         </text>
@@ -452,37 +464,29 @@ export const CaptureRatioQuadrant: React.FC<CaptureRatioProps> = ({ metrics }) =
           Vulnerable: Low Upside, High Downside
         </text>
 
-        {/* Benchmark anchor */}
         <circle cx={getX(100)} cy={getY(100)} r="4" fill="#f59e0b" />
         <text x={getX(100) + 6} y={getY(100) - 6} fill="#f59e0b" fontSize="10" fontWeight="600">
           Benchmark (100, 100)
         </text>
 
-        {/* Fund Points */}
-        {metrics.map((m) => {
-          const cx = getX(m.downsideCapture);
-          const cy = getY(m.upsideCapture);
-          const isFavorable = m.upsideCapture > 100 && m.downsideCapture < 100;
-          const color = isFavorable ? '#10b981' : m.upsideCapture > m.downsideCapture ? '#38bdf8' : '#fb923c';
+        {validMetrics.map((m) => {
+          const up = m.upsideCapture!;
+          const down = m.downsideCapture!;
+          const cx = getX(down);
+          const cy = getY(up);
+          const isFavorable = up > 100 && down < 100;
+          const color = isFavorable ? '#10b981' : up > down ? '#38bdf8' : '#fb923c';
 
           return (
             <g key={m.schemeCode} className="cursor-pointer group">
               <circle cx={cx} cy={cy} r="6" fill={color} fillOpacity="0.8" stroke="#ffffff" strokeWidth="1.5" />
-              <text
-                x={cx}
-                y={cy - 10}
-                textAnchor="middle"
-                fill="#ffffff"
-                fontSize="11"
-                fontWeight="600"
-              >
-                {m.fundName.split(' ')[0]} ({m.upsideCapture}% / {m.downsideCapture}%)
+              <text x={cx} y={cy - 10} textAnchor="middle" fill="#ffffff" fontSize="11" fontWeight="600">
+                {m.fundName.split(' ')[0]} ({up}% / {down}%)
               </text>
             </g>
           );
         })}
 
-        {/* Axis Labels */}
         <text x={padL + chartW / 2} y={height - 10} textAnchor="middle" fill="#64748b" fontSize="11" fontFamily="monospace">
           Downside Capture Ratio (%) — Lower is Better
         </text>
@@ -498,28 +502,40 @@ export const CaptureRatioQuadrant: React.FC<CaptureRatioProps> = ({ metrics }) =
           Upside Capture Ratio (%) — Higher is Better
         </text>
       </svg>
-      <div className="flex items-center justify-between text-xs text-slate-400 mt-2 px-2">
-        <span>Firms in top-left capture more bull market gains while shielding capital during market corrections.</span>
-      </div>
     </div>
   );
 };
 
 /**
- * Return Correlation Heatmap & Diversification Score
+ * Return Correlation Heatmap & Diversification Score (Null-safe)
  */
 interface CorrelationHeatmapProps {
+  available: boolean;
+  reason?: string | null;
   names: string[];
-  matrix: number[][];
-  diversificationScore: number;
+  matrix: (number | null)[][] | null;
+  diversificationScore: number | null;
 }
 
 export const CorrelationHeatmap: React.FC<CorrelationHeatmapProps> = ({
+  available,
+  reason,
   names,
   matrix,
   diversificationScore,
 }) => {
-  if (!names.length || !matrix.length) return null;
+  if (!available || !names.length || !matrix?.length) {
+    return (
+      <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-6 text-center space-y-1.5 font-sans">
+        <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+          Daily Return Correlation Matrix — Unavailable
+        </h3>
+        <p className="text-xs text-slate-500">
+          {reason || 'Unavailable: At least 2 validated non-quarantined schemes with sufficient overlapping sessions are required.'}
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-5 space-y-4 font-sans">
@@ -527,13 +543,13 @@ export const CorrelationHeatmap: React.FC<CorrelationHeatmapProps> = ({
         <div>
           <h3 className="text-sm font-semibold text-white">Daily Return Correlation Matrix</h3>
           <p className="text-xs text-slate-400">
-            Pairwise Pearson return correlation coefficient ($r$). Values close to 0 denote strong diversification.
+            Pairwise Pearson return correlation coefficient (r). Values closer to 0 denote stronger diversification.
           </p>
         </div>
         <div className="p-2.5 bg-slate-900 border border-slate-700/80 rounded-xl text-right">
           <div className="text-[10px] text-slate-400 uppercase font-medium">Diversification Score</div>
           <div className="text-xl font-bold font-mono text-emerald-400 mt-0.5">
-            {diversificationScore}/100
+            {diversificationScore !== null ? `${diversificationScore}/100` : 'Unavailable'}
           </div>
         </div>
       </div>
@@ -558,17 +574,20 @@ export const CorrelationHeatmap: React.FC<CorrelationHeatmapProps> = ({
                 </td>
                 {matrix[r].map((val, c) => {
                   const isDiag = r === c;
-                  const bgStyle = isDiag
-                    ? 'bg-slate-800 text-slate-400'
-                    : val < 0.3
-                    ? 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/60 font-bold'
-                    : val < 0.65
-                    ? 'bg-sky-950/60 text-sky-300 border border-sky-800/50'
-                    : 'bg-rose-950/50 text-rose-300 border border-rose-800/40';
+                  const bgStyle =
+                    val === null
+                      ? 'bg-slate-900 text-slate-500'
+                      : isDiag
+                      ? 'bg-slate-800 text-slate-400'
+                      : val < 0.3
+                      ? 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/60 font-bold'
+                      : val < 0.65
+                      ? 'bg-sky-950/60 text-sky-300 border border-sky-800/50'
+                      : 'bg-rose-950/50 text-rose-300 border border-rose-800/40';
 
                   return (
                     <td key={c} className={`p-2.5 border-t border-slate-800 transition-colors ${bgStyle}`}>
-                      <span>{val.toFixed(2)}</span>
+                      <span>{val !== null ? val.toFixed(2) : 'Unavailable'}</span>
                     </td>
                   );
                 })}
@@ -582,16 +601,27 @@ export const CorrelationHeatmap: React.FC<CorrelationHeatmapProps> = ({
 };
 
 /**
- * SIP Wealth Growth Line Chart
+ * SIP Wealth Growth Line Chart (Null-safe)
  */
 interface SipChartProps {
   simulation: SipSimulationResult;
   fundName: string;
 }
 
-export const SipGrowthChart: React.FC<SipChartProps> = ({ simulation, fundName }) => {
-  const { timeline, totalInvested, totalCorpus, xirrPct } = simulation;
-  if (!timeline.length) return null;
+export const SipGrowthChart: React.FC<SipChartProps> = ({ simulation }) => {
+  const { available, reason, timeline, totalInvested, totalCorpus, xirrPct } = simulation;
+  if (!available || !timeline.length || totalCorpus === null || totalInvested === null) {
+    return (
+      <div className="p-6 bg-slate-950/80 border border-slate-800 rounded-xl text-center space-y-1">
+        <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+          SIP Wealth Chart — Unavailable
+        </div>
+        <div className="text-xs text-slate-500">
+          {reason || 'Unavailable: Validated scheme NAV history required to simulate SIP cash flows.'}
+        </div>
+      </div>
+    );
+  }
 
   const width = 800;
   const height = 300;
@@ -603,8 +633,8 @@ export const SipGrowthChart: React.FC<SipChartProps> = ({ simulation, fundName }
   const chartW = width - padL - padR;
   const chartH = height - padT - padB;
 
-  const maxVal = Math.max(totalCorpus, totalInvested) * 1.1;
-  const getX = (i: number) => padL + (i / (timeline.length - 1)) * chartW;
+  const maxVal = Math.max(totalCorpus, totalInvested, 1) * 1.1;
+  const getX = (i: number) => padL + (i / Math.max(1, timeline.length - 1)) * chartW;
   const getY = (v: number) => padT + chartH - (v / maxVal) * chartH;
 
   const investedPath = timeline
@@ -620,7 +650,7 @@ export const SipGrowthChart: React.FC<SipChartProps> = ({ simulation, fundName }
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h3 className="text-sm font-semibold text-white">Systematic Investment Plan (SIP) Wealth Accumulation</h3>
-          <p className="text-xs text-slate-400">Monthly SIP of ₹{simulation.monthlyAmount.toLocaleString()} over historical period</p>
+          <p className="text-xs text-slate-400">Monthly SIP of ₹{simulation.monthlyAmount.toLocaleString()} over selected window</p>
         </div>
         <div className="flex items-center gap-6 text-xs font-mono">
           <div>
@@ -633,7 +663,9 @@ export const SipGrowthChart: React.FC<SipChartProps> = ({ simulation, fundName }
           </div>
           <div>
             <div className="text-slate-400">Annualized XIRR:</div>
-            <div className="font-bold text-indigo-400 text-sm">{xirrPct}%</div>
+            <div className="font-bold text-indigo-400 text-sm">
+              {xirrPct !== null ? `${xirrPct}%` : 'Unavailable'}
+            </div>
           </div>
         </div>
       </div>
@@ -641,13 +673,8 @@ export const SipGrowthChart: React.FC<SipChartProps> = ({ simulation, fundName }
       <div className="w-full overflow-hidden bg-slate-950 border border-slate-850 rounded-xl p-2">
         <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto select-none">
           <line x1={padL} y1={padT + chartH} x2={width - padR} y2={padT + chartH} stroke="#334155" strokeWidth="1" />
-
-          {/* Invested capital (gray line) */}
           <path d={investedPath} fill="none" stroke="#64748b" strokeWidth="2" strokeDasharray="4 4" />
-
-          {/* Accumulated corpus (emerald line) */}
           <path d={corpusPath} fill="none" stroke="#10b981" strokeWidth="2.8" strokeLinecap="round" />
-
           <text x={padL} y={height - 12} fill="#64748b" fontSize="11" fontFamily="monospace">
             {timeline[0]?.date}
           </text>

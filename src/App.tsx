@@ -5,35 +5,36 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  TrendingUp,
-  ShieldAlert,
-  Layers,
-  Activity,
-  Code2,
   Search,
   Download,
-  Filter,
   X,
   Plus,
   RefreshCw,
-  Coins,
-  FileText,
   Briefcase,
-  AlertCircle,
-  ExternalLink,
-  ChevronRight,
-  Sparkles,
+  AlertTriangle,
+  ShieldCheck,
+  ShieldAlert,
+  ClipboardCheck,
 } from 'lucide-react';
 
-import { FundMeta, NavPoint, RiskMetrics, AssetClass } from './types/quant';
+import {
+  FundMeta,
+  NavPoint,
+  NavValidationReport,
+  RiskMetrics,
+  TrailingCagrResult,
+  ValidatedNavSeries,
+} from './types/quant';
 import {
   PRESET_FUNDS,
   BENCHMARKS,
-  generateBenchmarkSeries,
+  DEFAULT_VERIFIED_PRESET_CODES,
+  resolveBenchmarkSeries,
   fetchLiveMfNav,
+  validateMfapiPayload,
 } from './data/presetFunds';
 import {
-  computeTrailingCagr,
+  computeTrailingCagrWithMeta,
   computeRollingReturns,
   computeBenchmarkHitRate,
   computeComprehensiveMetrics,
@@ -59,23 +60,34 @@ import { FundFactsheetModal } from './components/FundFactsheetModal';
 import { DataExportModal } from './components/DataExportModal';
 import { PythonExporter } from './components/PythonExporter';
 import { classifyAndBuildFundMeta } from './utils/mfapiClassifier';
+import { AMFI_SNAPSHOT_DATE, PRESET_RECONCILIATION_TABLE } from './utils/schemeIdentity';
 
 const COLOR_PALETTE = [
-  '#38bdf8', // Sky
-  '#34d399', // Emerald
-  '#f472b6', // Rose
-  '#a78bfa', // Purple
-  '#fb923c', // Orange
-  '#e879f9', // Fuchsia
-  '#2dd4bf', // Teal
+  '#38bdf8',
+  '#34d399',
+  '#f472b6',
+  '#a78bfa',
+  '#fb923c',
+  '#e879f9',
+  '#2dd4bf',
 ];
 
+const formatOptNum = (
+  val: number | null | undefined,
+  decimals: number = 2,
+  suffix: string = '',
+  plusSign: boolean = false
+): string => {
+  if (val === null || val === undefined || !Number.isFinite(val)) return 'Unavailable';
+  const sign = plusSign && val > 0 ? '+' : '';
+  return `${sign}${val.toFixed(decimals)}${suffix}`;
+};
+
 export default function App() {
-  // Navigation Tabs
   const [activeTab, setActiveTab] = useState<'perf' | 'risk' | 'overlap' | 'stress' | 'sip' | 'factsheet' | 'python'>('perf');
 
-  // Active Fund Universe
-  const [selectedCodes, setSelectedCodes] = useState<number[]>([122639, 127042, 118989, 118778]);
+  // Default to the 4 AMFI-verified / ISIN-reconciled presets; blocked presets are quarantined
+  const [selectedCodes, setSelectedCodes] = useState<number[]>(DEFAULT_VERIFIED_PRESET_CODES);
   const [customFunds, setCustomFunds] = useState<Record<number, FundMeta>>({});
   const [benchmarkSymbol, setBenchmarkSymbol] = useState<string>('^CRSLDX');
   const [timeHorizon, setTimeHorizon] = useState<number>(5);
@@ -86,29 +98,56 @@ export default function App() {
   // Modals
   const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isReconcileModalOpen, setIsReconcileModalOpen] = useState(false);
   const [factsheetFund, setFactsheetFund] = useState<FundMeta | null>(null);
 
-  // SIP Simulator State
+  // SIP & Stress Target State
   const [sipMonthlyAmount, setSipMonthlyAmount] = useState<number>(10000);
-  const [sipTargetCode, setSipTargetCode] = useState<number>(122639);
-
-  // Debt & Stress State
-  const [stressFundCode, setStressFundCode] = useState<number>(120503);
+  const [sipTargetCode, setSipTargetCode] = useState<number>(DEFAULT_VERIFIED_PRESET_CODES[0]);
+  const [stressFundCode, setStressFundCode] = useState<number>(DEFAULT_VERIFIED_PRESET_CODES[0]);
   const [customRateShockBps, setCustomRateShockBps] = useState<number>(50);
 
-  // Time-Series Storage & Loading
-  const [fundSeriesMap, setFundSeriesMap] = useState<Record<number, NavPoint[]>>({});
+  // Validated Time-Series Storage & Loading
+  const [validatedSeriesMap, setValidatedSeriesMap] = useState<Record<number, ValidatedNavSeries>>({});
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
-  // All combined available funds
   const allFunds = useMemo(() => {
     return { ...PRESET_FUNDS, ...customFunds };
   }, [customFunds]);
 
-  // Active selected fund objects
   const activeFundsList: FundMeta[] = useMemo(() => {
-    return selectedCodes.map((code) => allFunds[code] || PRESET_FUNDS[122639]);
+    return selectedCodes
+      .map((code) => allFunds[code])
+      .filter((f): f is FundMeta => Boolean(f));
   }, [selectedCodes, allFunds]);
+
+  // Derived valid NAV series & validation report maps
+  const fundSeriesMap = useMemo(() => {
+    const map: Record<number, NavPoint[]> = {};
+    for (const code of selectedCodes) {
+      const entry = validatedSeriesMap[code];
+      map[code] = entry && entry.validation.usable ? entry.points : [];
+    }
+    return map;
+  }, [selectedCodes, validatedSeriesMap]);
+
+  const validationMap = useMemo(() => {
+    const map: Record<number, NavValidationReport | undefined> = {};
+    for (const code of selectedCodes) {
+      map[code] = validatedSeriesMap[code]?.validation;
+    }
+    return map;
+  }, [selectedCodes, validatedSeriesMap]);
+
+  // Ensure SIP and Stress selectors track a currently selected scheme
+  useEffect(() => {
+    if (selectedCodes.length > 0 && !selectedCodes.includes(sipTargetCode)) {
+      setSipTargetCode(selectedCodes[0]);
+    }
+    if (selectedCodes.length > 0 && !selectedCodes.includes(stressFundCode)) {
+      setStressFundCode(selectedCodes[0]);
+    }
+  }, [selectedCodes, sipTargetCode, stressFundCode]);
 
   // Keyboard shortcut Cmd+K / Ctrl+K
   useEffect(() => {
@@ -122,109 +161,146 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Fetch or regenerate time-series for all selected funds
+  // Fetch & validate NAV time-series when selectedCodes change (independent of horizon switches)
   useEffect(() => {
     let isMounted = true;
-    setIsRefreshing(true);
+    const missingCodes = selectedCodes.filter((code) => !validatedSeriesMap[code]);
+    if (missingCodes.length === 0) return;
 
-    const loadSeries = async () => {
-      const newMap: Record<number, NavPoint[]> = {};
-      for (const code of selectedCodes) {
-        const series = await fetchLiveMfNav(code);
-        newMap[code] = series;
+    setIsRefreshing(true);
+    const loadMissing = async () => {
+      const fetched: Record<number, ValidatedNavSeries> = {};
+      for (const code of missingCodes) {
+        fetched[code] = await fetchLiveMfNav(code, { expectedMeta: allFunds[code] });
       }
       if (isMounted) {
-        setFundSeriesMap(newMap);
+        setValidatedSeriesMap((prev) => ({ ...prev, ...fetched }));
         setIsRefreshing(false);
       }
     };
 
-    loadSeries();
-
+    loadMissing();
     return () => {
       isMounted = false;
     };
-  }, [selectedCodes, timeHorizon]);
+  }, [selectedCodes, allFunds, validatedSeriesMap]);
 
-  // Benchmark Series: aligned to lead fund's authentic business calendar
-  const benchmarkSeries = useMemo(() => {
-    const leadSeries = selectedCodes[0] ? fundSeriesMap[selectedCodes[0]] : undefined;
-    return generateBenchmarkSeries(benchmarkSymbol, leadSeries);
-  }, [benchmarkSymbol, selectedCodes, fundSeriesMap]);
-
-  const activeBenchmark = useMemo(() => {
-    return BENCHMARKS.find((b) => b.symbol === benchmarkSymbol) || BENCHMARKS[0];
+  // Independent Benchmark Resolution: strictly invariant to fund list, lead fund, or reorder
+  const benchmarkStatus = useMemo(() => {
+    return resolveBenchmarkSeries(benchmarkSymbol);
   }, [benchmarkSymbol]);
 
-  // Add / Remove Fund Handler
+  const benchmarkSeries = benchmarkStatus.series;
+
   const handleToggleFund = (code: number) => {
     if (selectedCodes.includes(code)) {
       if (selectedCodes.length > 1) {
         setSelectedCodes(selectedCodes.filter((c) => c !== code));
       }
-    } else {
-      setSelectedCodes([...selectedCodes, code]);
+      return;
     }
+
+    const rec = PRESET_RECONCILIATION_TABLE[code];
+    if (rec && !rec.selectable) {
+      return;
+    }
+    setSelectedCodes([...selectedCodes, code]);
   };
 
-  const handleAddCustomScheme = async (code: number) => {
-    if (!allFunds[code]) {
-      try {
-        const resp = await fetch(`https://api.mfapi.in/mf/${code}`);
-        if (resp.ok) {
-          const json = await resp.json();
-          const meta = json.meta || { scheme_code: code, scheme_name: `Scheme ${code}` };
-          const latestNav = json.data && json.data[0] ? parseFloat(json.data[0].nav) : undefined;
-          const newFund = classifyAndBuildFundMeta(meta, latestNav);
-          setCustomFunds((prev) => ({ ...prev, [code]: newFund }));
+  const handleAddCustomScheme = async (
+    code: number
+  ): Promise<{ ok: boolean; message?: string }> => {
+    const rec = PRESET_RECONCILIATION_TABLE[code];
+    if (rec && !rec.selectable) {
+      return { ok: false, message: rec.reason };
+    }
 
-          // Instantly cache series if returned in response
-          if (json.data && Array.isArray(json.data) && json.data.length > 0) {
-            const formatted: NavPoint[] = json.data
-              .map((item: { date: string; nav: string }) => {
-                const parts = item.date.split('-');
-                if (parts.length === 3) {
-                  return { date: `${parts[2]}-${parts[1]}-${parts[0]}`, nav: parseFloat(item.nav) };
-                }
-                return null;
-              })
-              .filter((p: NavPoint | null): p is NavPoint => p !== null && !isNaN(p.nav))
-              .sort((a: NavPoint, b: NavPoint) => a.date.localeCompare(b.date));
+    if (allFunds[code]) {
+      const existingSeries = validatedSeriesMap[code] ?? (await fetchLiveMfNav(code, { expectedMeta: allFunds[code] }));
+      setValidatedSeriesMap((prev) => ({ ...prev, [code]: existingSeries }));
 
-            if (formatted.length > 0) {
-              setFundSeriesMap((prev) => ({ ...prev, [code]: formatted }));
-            }
-          }
-        }
-      } catch (err) {
-        console.warn(`Fallback for scheme ${code}:`, err);
-        const fallbackFund = classifyAndBuildFundMeta({
-          scheme_code: code,
-          scheme_name: `Mutual Fund Scheme ${code}`,
-          fund_house: 'Indian Mutual Fund AMC',
-          scheme_category: 'Flexi Cap Fund',
-        });
-        setCustomFunds((prev) => ({ ...prev, [code]: fallbackFund }));
+      if (!existingSeries.identity?.verified) {
+        return {
+          ok: false,
+          message: existingSeries.identity?.reason || 'Preset identity verification failed.',
+        };
       }
+      if (!existingSeries.validation.usable) {
+        return {
+          ok: false,
+          message: existingSeries.validation.unavailableReason || 'Scheme NAV validation failed.',
+        };
+      }
+      if (!selectedCodes.includes(code)) {
+        setSelectedCodes((prev) => [...prev, code]);
+      }
+      return { ok: true, message: `Added verified scheme ${allFunds[code].name} (${code}).` };
     }
 
-    if (!selectedCodes.includes(code)) {
-      setSelectedCodes((prev) => [...prev, code]);
+    try {
+      const resp = await fetch(`https://api.mfapi.in/mf/${code}`);
+      if (!resp.ok) {
+        return { ok: false, message: `Provider returned HTTP ${resp.status} for scheme ${code}.` };
+      }
+
+      const json = await resp.json();
+      if (!json || !json.meta) {
+        return { ok: false, message: `Malformed provider response for scheme ${code}.` };
+      }
+
+      const newFund = classifyAndBuildFundMeta(json.meta);
+      const validated = validateMfapiPayload(code, json, { expectedMeta: newFund });
+
+      if (!validated.identity?.verified) {
+        return {
+          ok: false,
+          message:
+            validated.identity?.reason ||
+            `Scheme ${code} blocked: plan, option, or ISIN could not be verified.`,
+        };
+      }
+
+      if (!validated.validation.usable) {
+        return {
+          ok: false,
+          message:
+            validated.validation.unavailableReason ||
+            `Scheme ${code} NAV series failed validation (${validated.validation.status}).`,
+        };
+      }
+
+      setCustomFunds((prev) => ({ ...prev, [code]: newFund }));
+      setValidatedSeriesMap((prev) => ({ ...prev, [code]: validated }));
+      if (!selectedCodes.includes(code)) {
+        setSelectedCodes((prev) => [...prev, code]);
+      }
+      return {
+        ok: true,
+        message: validated.validation.quarantinedFromBreak
+          ? `Added ${newFund.name} (${code}) with corporate-action break quarantine notice.`
+          : `Added ${newFund.name} (${code}) — verified identity & NAV series.`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : `Network error adding scheme ${code}.`,
+      };
     }
   };
 
-  // Trailing Returns (3M, 6M, 1Y, 3Y, 5Y, 7Y, 10Y)
-  const trailingCagrMap = useMemo(() => {
-    const map: Record<number, Record<string, number | undefined>> = {};
+  // Trailing Returns with unavailable reasons
+  const trailingMetaMap = useMemo(() => {
+    const map: Record<number, TrailingCagrResult> = {};
     selectedCodes.forEach((code) => {
       const s = fundSeriesMap[code] || [];
-      map[code] = computeTrailingCagr(s, [0.25, 0.5, 1, 3, 5, 7, 10]);
+      const breaks = validationMap[code]?.corporateActionBreaks;
+      map[code] = computeTrailingCagrWithMeta(s, [0.25, 0.5, 1, 3, 5, 7, 10], breaks);
     });
     return map;
-  }, [selectedCodes, fundSeriesMap]);
+  }, [selectedCodes, fundSeriesMap, validationMap]);
 
-  const benchmarkCagr = useMemo(() => {
-    return computeTrailingCagr(benchmarkSeries, [0.25, 0.5, 1, 3, 5, 7, 10]);
+  const benchmarkCagrMeta = useMemo(() => {
+    return computeTrailingCagrWithMeta(benchmarkSeries, [0.25, 0.5, 1, 3, 5, 7, 10]);
   }, [benchmarkSeries]);
 
   // Rolling Return Distributions & Hit Rates
@@ -234,47 +310,50 @@ export default function App() {
     const fundsRolling = selectedCodes.map((code, idx) => {
       const fund = allFunds[code];
       const series = fundSeriesMap[code] || [];
-      const dist = computeRollingReturns(series, rollingWindowYears);
-      const hitRate = computeBenchmarkHitRate(dist.series, benchDist.series);
+      const breaks = validationMap[code]?.corporateActionBreaks;
+      const dist = computeRollingReturns(series, rollingWindowYears, 252, breaks);
+      const hitRate =
+        benchmarkStatus.available && dist.available && benchDist.available
+          ? computeBenchmarkHitRate(dist.series, benchDist.series)
+          : null;
       return {
         code,
         name: fund?.name || `Scheme ${code}`,
-        category: fund?.category || 'Equity',
+        category: fund?.category || 'Unclassified',
         dist,
         hitRate,
         color: COLOR_PALETTE[idx % COLOR_PALETTE.length],
       };
     });
 
-    return {
-      benchDist,
-      fundsRolling,
-    };
-  }, [selectedCodes, allFunds, fundSeriesMap, benchmarkSeries, rollingWindowYears]);
+    return { benchDist, fundsRolling };
+  }, [selectedCodes, allFunds, fundSeriesMap, validationMap, benchmarkSeries, benchmarkStatus.available, rollingWindowYears]);
 
-  // Risk & Capital Market Line Metrics
+  // Risk & Capital Market Line Metrics (Fund-only vs Benchmark-relative decoupled)
   const riskMetricsList: RiskMetrics[] = useMemo(() => {
     return selectedCodes.map((code) => {
       const fund = allFunds[code];
       const series = fundSeriesMap[code] || [];
+      const breaks = validationMap[code]?.corporateActionBreaks;
       return computeComprehensiveMetrics(
         series,
         benchmarkSeries,
         fund?.name || `Scheme ${code}`,
         code,
-        fund?.category || 'Equity',
+        fund?.category || 'Unclassified',
         fund?.asset_class || 'Equity',
-        rfRate / 100.0
+        rfRate / 100.0,
+        breaks
       );
     });
-  }, [selectedCodes, allFunds, fundSeriesMap, benchmarkSeries, rfRate]);
+  }, [selectedCodes, allFunds, fundSeriesMap, validationMap, benchmarkSeries, rfRate]);
 
-  // Overlap & Return Correlation Data
+  // Overlap, Market-Cap, Sector & Return Correlation
   const overlapData = useMemo(() => {
     const fundsList = selectedCodes.map((code) => ({
       scheme_code: code,
       name: allFunds[code]?.name || `Scheme ${code}`,
-      holdings: allFunds[code]?.holdings || [],
+      holdings: allFunds[code]?.holdings ?? null,
     }));
 
     const matrixRes = computeOverlapMatrix(fundsList);
@@ -286,28 +365,38 @@ export default function App() {
       nameMap[c] = allFunds[c]?.name || `Scheme ${c}`;
     });
 
-    const corrRes = computeReturnCorrelationMatrix(fundSeriesMap, nameMap);
+    const activeSeriesOnly: Record<number, NavPoint[]> = {};
+    selectedCodes.forEach((c) => {
+      activeSeriesOnly[c] = fundSeriesMap[c] || [];
+    });
+
+    const corrRes = computeReturnCorrelationMatrix(activeSeriesOnly, nameMap);
 
     return {
+      overlapAvailable: matrixRes.available,
+      overlapReason: matrixRes.reason,
       names: matrixRes.names,
       matrix: matrixRes.matrix,
       mcapExposure,
       sectorExposure,
+      corrAvailable: corrRes.available,
+      corrReason: corrRes.reason,
       corrNames: corrRes.names,
       corrMatrix: corrRes.matrix,
       diversificationScore: corrRes.diversificationScore,
     };
   }, [selectedCodes, allFunds, fundSeriesMap]);
 
-  // SIP Simulation Result
+  // SIP Simulation Result — NEVER falls back to benchmarkSeries
   const sipResult = useMemo(() => {
-    const series = fundSeriesMap[sipTargetCode] || benchmarkSeries;
-    return simulateMonthlySip(series, sipMonthlyAmount, timeHorizon);
-  }, [fundSeriesMap, sipTargetCode, benchmarkSeries, sipMonthlyAmount, timeHorizon]);
+    const series = fundSeriesMap[sipTargetCode] || [];
+    const breaks = validationMap[sipTargetCode]?.corporateActionBreaks;
+    return simulateMonthlySip(series, sipMonthlyAmount, timeHorizon, breaks);
+  }, [fundSeriesMap, validationMap, sipTargetCode, sipMonthlyAmount, timeHorizon]);
 
   // Stress Testing Target Fund
   const targetStressFund = useMemo(() => {
-    return allFunds[stressFundCode] || activeFundsList[0] || PRESET_FUNDS[120503];
+    return allFunds[stressFundCode] || activeFundsList[0] || PRESET_FUNDS[122639];
   }, [stressFundCode, allFunds, activeFundsList]);
 
   const liquidityResult = useMemo(() => {
@@ -318,36 +407,47 @@ export default function App() {
     );
   }, [targetStressFund, adtvParticipation]);
 
-  const durationShocks = useMemo(() => {
+  const durationResult = useMemo(() => {
     return calculateDurationSensitivity(
-      targetStressFund.macaulay_duration || 3.85,
-      targetStressFund.ytm || 0.0745,
-      24.5
+      targetStressFund.macaulay_duration,
+      targetStressFund.ytm,
+      null
     );
   }, [targetStressFund]);
 
   const customShockResult = useMemo(() => {
-    const macDur = targetStressFund.macaulay_duration || 3.85;
-    const ytm = targetStressFund.ytm || 0.0745;
+    const macDur = targetStressFund.macaulay_duration;
+    const ytm = targetStressFund.ytm;
+    if (macDur == null || ytm == null || !Number.isFinite(macDur) || macDur <= 0 || !Number.isFinite(ytm)) {
+      return { available: false, reason: durationResult.reason };
+    }
     const modDur = macDur / (1.0 + ytm);
     const deltaY = customRateShockBps / 10000.0;
     const durImpact = -modDur * deltaY;
-    const cvxImpact = 0.5 * 24.5 * Math.pow(deltaY, 2);
-    const totalImpact = durImpact + cvxImpact;
     return {
+      available: true,
       modDur,
       durImpactPct: durImpact * 100,
-      cvxBenefitPct: cvxImpact * 100,
-      totalImpactPct: totalImpact * 100,
-      simulatedNav: 100.0 * (1.0 + totalImpact),
+      simulatedNav: 100.0 * (1.0 + durImpact),
     };
-  }, [targetStressFund, customRateShockBps]);
+  }, [targetStressFund, customRateShockBps, durationResult.reason]);
 
-  // Named and sliced series for cumulative performance chart according to timeHorizon
+  // Sliced cumulative performance series using latest validated date (not browser clock skew)
   const slicedPerfData = useMemo(() => {
+    let latestIso = '';
+    selectedCodes.forEach((code) => {
+      const s = fundSeriesMap[code];
+      if (s && s.length > 0 && s[s.length - 1].date > latestIso) {
+        latestIso = s[s.length - 1].date;
+      }
+    });
+    if (benchmarkSeries.length > 0 && benchmarkSeries[benchmarkSeries.length - 1].date > latestIso) {
+      latestIso = benchmarkSeries[benchmarkSeries.length - 1].date;
+    }
+
+    const anchorDate = latestIso ? new Date(`${latestIso}T00:00:00Z`) : new Date();
     const targetDays = timeHorizon * 365.25;
-    const now = new Date();
-    const cutoffDate = new Date(now.getTime() - targetDays * 86400000).toISOString().split('T')[0];
+    const cutoffDate = new Date(anchorDate.getTime() - targetDays * 86400000).toISOString().split('T')[0];
 
     const slicedBench = benchmarkSeries.filter((p) => p.date >= cutoffDate);
     const slicedMap: Record<string, NavPoint[]> = {};
@@ -355,22 +455,42 @@ export default function App() {
     selectedCodes.forEach((code) => {
       const name = allFunds[code]?.name || `Scheme ${code}`;
       const series = fundSeriesMap[code] || [];
+      const breaks = validationMap[code]?.corporateActionBreaks || [];
       const filtered = series.filter((p) => p.date >= cutoffDate);
-      slicedMap[name] = filtered.length > 0 ? filtered : series;
+      const effective = filtered.length > 0 ? filtered : series;
+      // Do not chart split-corrupted curve across an unresolved break
+      const hasBreakInSlice =
+        effective.length >= 2 &&
+        breaks.some((b) => effective[0].date < b.date && effective[effective.length - 1].date >= b.date);
+      slicedMap[name] = hasBreakInSlice ? [] : effective;
     });
 
     return {
       bench: slicedBench.length > 0 ? slicedBench : benchmarkSeries,
       funds: slicedMap,
     };
-  }, [selectedCodes, allFunds, fundSeriesMap, benchmarkSeries, timeHorizon]);
+  }, [selectedCodes, allFunds, fundSeriesMap, validationMap, benchmarkSeries, timeHorizon]);
+
+  // Active warnings across selected schemes
+  const activeWarnings = useMemo(() => {
+    const msgs: string[] = [];
+    selectedCodes.forEach((code) => {
+      const val = validationMap[code];
+      if (!val) return;
+      if (!val.usable && val.unavailableReason) {
+        msgs.push(`Scheme ${code}: ${val.unavailableReason}`);
+      } else if (val.quarantinedFromBreak) {
+        val.corporateActionBreaks.forEach((b) => msgs.push(`Scheme ${code}: ${b.explanation}`));
+      }
+    });
+    return msgs;
+  }, [selectedCodes, validationMap]);
 
   return (
     <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col font-sans selection:bg-indigo-900 selection:text-white">
-      {/* Top Bar Contract (3 Zones, Perfectly Aligned) */}
+      {/* Top Bar */}
       <header className="border-b border-slate-800 bg-[#0f172a]/95 backdrop-blur-md sticky top-0 z-40">
         <div className="max-w-[1720px] mx-auto w-full px-6 py-3.5 flex items-center justify-between gap-6">
-          {/* Zone 1: Brand Wordmark */}
           <div className="flex items-center gap-3 shrink-0">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-600 to-emerald-400 flex items-center justify-center text-white font-bold text-sm shadow-md">
               ₹
@@ -380,73 +500,45 @@ export default function App() {
                 Indian MF Quant Studio
               </span>
               <span className="text-[11px] text-slate-400 font-mono hidden xl:inline">
-                · Institutional Terminal
+                · Identity &amp; Output Safety Terminal
               </span>
             </div>
           </div>
 
-          {/* Zone 2: Navigation Links */}
-          <nav className="hidden lg:flex items-center gap-6 text-xs font-medium text-slate-300">
-            <button
-              onClick={() => setActiveTab('perf')}
-              className={`transition-colors whitespace-nowrap ${
-                activeTab === 'perf' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
-              }`}
-            >
-              Performance &amp; Rolling
-            </button>
-            <button
-              onClick={() => setActiveTab('risk')}
-              className={`transition-colors whitespace-nowrap ${
-                activeTab === 'risk' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
-              }`}
-            >
-              Risk &amp; Alpha
-            </button>
-            <button
-              onClick={() => setActiveTab('overlap')}
-              className={`transition-colors whitespace-nowrap ${
-                activeTab === 'overlap' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
-              }`}
-            >
-              ISIN Overlap &amp; Correlation
-            </button>
-            <button
-              onClick={() => setActiveTab('stress')}
-              className={`transition-colors whitespace-nowrap ${
-                activeTab === 'stress' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
-              }`}
-            >
-              Debt &amp; Stress
-            </button>
-            <button
-              onClick={() => setActiveTab('sip')}
-              className={`transition-colors whitespace-nowrap ${
-                activeTab === 'sip' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
-              }`}
-            >
-              SIP Wealth Simulator
-            </button>
-            <button
-              onClick={() => setActiveTab('factsheet')}
-              className={`transition-colors whitespace-nowrap ${
-                activeTab === 'factsheet' ? 'text-emerald-400 font-bold underline underline-offset-4' : 'hover:text-white'
-              }`}
-            >
-              Fund Factsheets
-            </button>
-            <button
-              onClick={() => setActiveTab('python')}
-              className={`transition-colors whitespace-nowrap ${
-                activeTab === 'python' ? 'text-indigo-400 font-bold underline underline-offset-4' : 'hover:text-white'
-              }`}
-            >
-              Python Suite
-            </button>
+          <nav className="hidden lg:flex items-center gap-5 text-xs font-medium text-slate-300">
+            {[
+              { id: 'perf', label: 'Performance & Rolling' },
+              { id: 'risk', label: 'Risk & Alpha' },
+              { id: 'overlap', label: 'ISIN Overlap & Correlation' },
+              { id: 'stress', label: 'Debt & Stress' },
+              { id: 'sip', label: 'SIP Wealth Simulator' },
+              { id: 'factsheet', label: 'Fund Factsheets' },
+              { id: 'python', label: 'Python Suite' },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as typeof activeTab)}
+                className={`transition-colors whitespace-nowrap ${
+                  activeTab === tab.id
+                    ? 'text-emerald-400 font-bold underline underline-offset-4'
+                    : 'hover:text-white'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
           </nav>
 
-          {/* Zone 3: Quick Action Bar */}
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setIsReconcileModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-amber-300 bg-amber-950/60 hover:bg-amber-900/70 rounded-lg border border-amber-800/70 transition-all"
+              title="Inspect Nine-Preset AMFI Reconciliation Table"
+            >
+              <ClipboardCheck className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">9-Preset AMFI Audit</span>
+            </button>
+
             <button
               onClick={() => setIsSearchModalOpen(true)}
               className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-slate-300 bg-slate-800/90 hover:bg-slate-700 hover:text-white rounded-lg border border-slate-700/80 transition-all shadow-xs"
@@ -470,7 +562,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* Active Comparison Strip (Chips with Remove Button) */}
+      {/* Active Comparison Strip */}
       <section className="border-b border-slate-800/80 bg-[#0c1220] py-2 px-6">
         <div className="max-w-[1720px] mx-auto w-full flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex flex-wrap items-center gap-2">
@@ -479,32 +571,50 @@ export default function App() {
               Comparing ({selectedCodes.length}):
             </span>
 
-            {activeFundsList.map((fund) => (
-              <div
-                key={fund.scheme_code}
-                className="inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-lg bg-slate-800/90 border border-slate-700/80 text-slate-200 text-xs shadow-xs"
-              >
-                <span className="truncate max-w-[150px] font-medium" title={fund.name}>
-                  {fund.name}
-                </span>
-                <span className={`text-[9px] px-1.5 py-0.2 rounded font-semibold ${
-                  fund.asset_class === 'Debt' ? 'bg-amber-950 text-amber-300' :
-                  fund.asset_class === 'Hybrid' ? 'bg-purple-950 text-purple-300' :
-                  'bg-indigo-950 text-indigo-300'
-                }`}>
-                  {fund.category}
-                </span>
-                {selectedCodes.length > 1 && (
-                  <button
-                    onClick={() => handleToggleFund(fund.scheme_code)}
-                    className="p-0.5 text-slate-400 hover:text-rose-400 rounded hover:bg-slate-700 transition-colors"
-                    title={`Remove ${fund.name} from comparison`}
+            {activeFundsList.map((fund) => {
+              const val = validationMap[fund.scheme_code];
+              const isQuarantined = val?.quarantinedFromBreak;
+              return (
+                <div
+                  key={fund.scheme_code}
+                  className="inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-lg bg-slate-800/90 border border-slate-700/80 text-slate-200 text-xs shadow-xs"
+                >
+                  {fund.identityStatus.verified ? (
+                    <ShieldCheck className="w-3 h-3 text-emerald-400 shrink-0" />
+                  ) : (
+                    <ShieldAlert className="w-3 h-3 text-rose-400 shrink-0" />
+                  )}
+                  <span className="truncate max-w-[150px] font-medium" title={`${fund.name} (${fund.isin ?? 'Unavailable'})`}>
+                    {fund.name}
+                  </span>
+                  {isQuarantined && (
+                    <span className="text-[9px] px-1 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-800/70">
+                      Split Quarantine
+                    </span>
+                  )}
+                  <span
+                    className={`text-[9px] px-1.5 py-0.2 rounded font-semibold ${
+                      fund.asset_class === 'Debt'
+                        ? 'bg-amber-950 text-amber-300'
+                        : fund.asset_class === 'Hybrid'
+                        ? 'bg-purple-950 text-purple-300'
+                        : 'bg-indigo-950 text-indigo-300'
+                    }`}
                   >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            ))}
+                    {fund.category}
+                  </span>
+                  {selectedCodes.length > 1 && (
+                    <button
+                      onClick={() => handleToggleFund(fund.scheme_code)}
+                      className="p-0.5 text-slate-400 hover:text-rose-400 rounded hover:bg-slate-700 transition-colors"
+                      title={`Remove ${fund.name}`}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
 
             <button
               onClick={() => setIsSearchModalOpen(true)}
@@ -515,19 +625,28 @@ export default function App() {
             </button>
           </div>
 
-          <div className="flex items-center gap-4 text-[11px] text-slate-400 font-mono">
-            <span>Benchmark: <span className="text-amber-400 font-semibold">{activeBenchmark.name}</span></span>
+          <div className="flex flex-wrap items-center gap-4 text-[11px] text-slate-400 font-mono">
+            <span>
+              Benchmark:{' '}
+              <span className={benchmarkStatus.available ? 'text-amber-400 font-semibold' : 'text-rose-400 font-semibold'}>
+                {benchmarkStatus.name} ({benchmarkStatus.available ? benchmarkStatus.variant : 'Unavailable'})
+              </span>
+            </span>
             <span>·</span>
-            <span>Rf: <span className="text-emerald-400 font-semibold">{rfRate.toFixed(2)}%</span></span>
+            <span>
+              Rf: <span className="text-emerald-400 font-semibold">{rfRate.toFixed(2)}%</span>
+            </span>
             <span>·</span>
-            <span>ADTV Limit: <span className="text-sky-400 font-semibold">{adtvParticipation}%</span></span>
+            <span>
+              ADTV Limit: <span className="text-sky-400 font-semibold">{adtvParticipation}%</span>
+            </span>
           </div>
         </div>
       </section>
 
-      {/* Main Workspace Canvas (Full Width & Aligned) */}
+      {/* Main Workspace Canvas */}
       <div className="flex-1 max-w-[1720px] w-full mx-auto px-6 py-6 flex flex-col lg:flex-row gap-6">
-        {/* Left Side Quick Parameter Drawer */}
+        {/* Left Parameter Drawer */}
         <aside className="w-full lg:w-64 shrink-0 space-y-5 bg-[#0f172a]/70 border border-slate-800 rounded-xl p-4.5 self-start shadow-sm">
           <div>
             <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">
@@ -544,6 +663,9 @@ export default function App() {
                 </option>
               ))}
             </select>
+            <div className="text-[10px] text-amber-400/90 mt-1.5 leading-snug">
+              Status: {benchmarkStatus.available ? `Verified (${benchmarkStatus.source})` : 'Unavailable (Batch 2 TRI feed pending)'}
+            </div>
           </div>
 
           <div>
@@ -559,7 +681,6 @@ export default function App() {
                   : `${timeHorizon} Years`}
               </span>
             </div>
-            {/* Horizon Select Dropdown */}
             <select
               value={timeHorizon}
               onChange={(e) => setTimeHorizon(parseFloat(e.target.value))}
@@ -574,7 +695,6 @@ export default function App() {
               <option value={10}>10 Years (Trailing 10Y)</option>
               <option value={12}>Max History (~12 Years)</option>
             </select>
-            {/* Quick Horizon Buttons */}
             <div className="grid grid-cols-4 gap-1">
               {[
                 { label: '3M', val: 0.25 },
@@ -615,7 +735,7 @@ export default function App() {
               onChange={(e) => setRfRate(parseFloat(e.target.value))}
               className="w-full accent-indigo-500 cursor-pointer"
             />
-            <div className="text-[10px] text-slate-500 mt-0.5">Indian 10Y Sovereign G-Sec</div>
+            <div className="text-[10px] text-slate-500 mt-0.5">Annualized Rf applied across risk &amp; exports</div>
           </div>
 
           <div>
@@ -632,10 +752,10 @@ export default function App() {
               onChange={(e) => setAdtvParticipation(parseInt(e.target.value, 10))}
               className="w-full accent-amber-500 cursor-pointer"
             />
-            <div className="text-[10px] text-slate-500 mt-0.5">Daily market volume liquidity limit</div>
+            <div className="text-[10px] text-slate-500 mt-0.5">Modeled liquidity daily limit</div>
           </div>
 
-          <div className="border-t border-slate-800 pt-3">
+          <div className="border-t border-slate-800 pt-3 space-y-2">
             <button
               onClick={() => setIsSearchModalOpen(true)}
               className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors flex items-center justify-center gap-1.5"
@@ -643,29 +763,55 @@ export default function App() {
               <Search className="w-3.5 h-3.5 text-indigo-400" />
               <span>Browse All Mutual Funds</span>
             </button>
+            <button
+              onClick={() => setIsReconcileModalOpen(true)}
+              className="w-full py-2 bg-amber-950/40 hover:bg-amber-900/50 text-amber-200 text-xs font-semibold rounded-lg border border-amber-800/60 transition-colors flex items-center justify-center gap-1.5"
+            >
+              <ClipboardCheck className="w-3.5 h-3.5 text-amber-400" />
+              <span>View 9-Preset AMFI Audit</span>
+            </button>
           </div>
         </aside>
 
-        {/* Central Dynamic Viewport */}
+        {/* Main Viewport */}
         <main className="flex-1 space-y-6 min-w-0">
-          {/* ========================================================= */}
-          {/* TAB 1: PERFORMANCE & ROLLING RETURNS                     */}
-          {/* ========================================================= */}
+          {/* Safety & Validation Banners */}
+          {(!benchmarkStatus.available || activeWarnings.length > 0) && (
+            <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-800/60 text-xs text-amber-200 space-y-1.5">
+              {!benchmarkStatus.available && (
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <span>
+                    <span className="font-semibold">Benchmark Data Unavailable:</span> {benchmarkStatus.reason}{' '}
+                    Validated fund-only returns, volatility, Sharpe, Sortino, drawdown, and Calmar remain active.
+                  </span>
+                </div>
+              )}
+              {activeWarnings.map((w, idx) => (
+                <div key={idx} className="flex items-start gap-2 text-rose-200">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <span>{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* TAB 1: PERFORMANCE & ROLLING */}
           {activeTab === 'perf' && (
             <div className="space-y-6">
-              {/* Cumulative Growth Chart */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                 <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
                   <div>
                     <h2 className="text-base font-bold text-white tracking-tight">Cumulative Growth (Rebased to 100)</h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Normalized performance rebased to 100 at start of {timeHorizon}-year horizon against {activeBenchmark.name}.
+                      Normalized validated fund NAV series over {timeHorizon}-year window
+                      {benchmarkStatus.available ? ` vs ${benchmarkStatus.name}.` : ' (Benchmark trace unavailable).'}
                     </p>
                   </div>
                   {isRefreshing && (
                     <div className="flex items-center gap-1.5 text-xs text-indigo-400 font-mono">
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Syncing time-series...</span>
+                      <span>Validating time-series...</span>
                     </div>
                   )}
                 </div>
@@ -673,19 +819,20 @@ export default function App() {
                 <PerformanceChart
                   seriesMap={slicedPerfData.funds}
                   benchSeries={slicedPerfData.bench}
-                  benchName={activeBenchmark.name}
+                  benchName={benchmarkStatus.name}
+                  benchAvailable={benchmarkStatus.available}
+                  benchReason={benchmarkStatus.reason}
                   colors={COLOR_PALETTE}
                 />
               </div>
 
-              {/* Trailing Returns Table & Rolling Hit Rates */}
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                {/* Trailing Returns Table */}
+                {/* Trailing Returns */}
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                   <div className="flex items-center justify-between mb-1">
                     <h3 className="text-sm font-bold text-white">Trailing Returns &amp; CAGR (%) Matrix</h3>
                     <span className="text-[10px] text-indigo-400 font-mono bg-indigo-950/60 border border-indigo-800/60 px-2 py-0.5 rounded">
-                      Sub-annual &amp; Multi-year
+                      Corporate-Action Guarded
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mb-3">Absolute returns for &lt;1Y; annualized CAGR for ≥1Y.</p>
@@ -695,8 +842,8 @@ export default function App() {
                       <thead>
                         <tr className="border-b border-slate-800 text-slate-400 font-sans">
                           <th className="py-2.5 text-left font-medium">Scheme / Benchmark</th>
-                          <th className="py-2.5 px-2 font-medium" title="3-Month Absolute Return">3M*</th>
-                          <th className="py-2.5 px-2 font-medium" title="6-Month Absolute Return">6M*</th>
+                          <th className="py-2.5 px-2 font-medium">3M*</th>
+                          <th className="py-2.5 px-2 font-medium">6M*</th>
                           <th className="py-2.5 px-2 font-medium">1Y</th>
                           <th className="py-2.5 px-2 font-medium">3Y</th>
                           <th className="py-2.5 px-2 font-medium">5Y</th>
@@ -706,12 +853,21 @@ export default function App() {
                       </thead>
                       <tbody className="divide-y divide-slate-800/60">
                         {activeFundsList.map((fund) => {
-                          const cagr = trailingCagrMap[fund.scheme_code] || {};
-                          const renderCell = (val: number | undefined) => {
-                            if (val === undefined) return <span className="text-slate-500 font-normal">N/A</span>;
+                          const cagrMeta = trailingMetaMap[fund.scheme_code];
+                          const cagr = cagrMeta?.values || {};
+                          const reasons = cagrMeta?.unavailableReasons || {};
+                          const renderCell = (key: string) => {
+                            const val = cagr[key];
+                            if (val === null || val === undefined) {
+                              return (
+                                <span className="text-slate-500 font-normal" title={reasons[key] || 'Unavailable'}>
+                                  Unavailable
+                                </span>
+                              );
+                            }
                             return (
                               <span className={val >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                                {val > 0 ? `+${val.toFixed(2)}` : val.toFixed(2)}%
+                                {formatOptNum(val, 2, '%', true)}
                               </span>
                             );
                           };
@@ -720,47 +876,34 @@ export default function App() {
                               <td className="py-2.5 text-left font-sans text-slate-200 font-medium truncate max-w-[180px]">
                                 {fund.name}
                               </td>
-                              <td className="py-2.5 px-2">{renderCell(cagr['3M'])}</td>
-                              <td className="py-2.5 px-2">{renderCell(cagr['6M'])}</td>
-                              <td className="py-2.5 px-2">{renderCell(cagr['1Y'])}</td>
-                              <td className="py-2.5 px-2">{renderCell(cagr['3Y'])}</td>
-                              <td className="py-2.5 px-2">{renderCell(cagr['5Y'])}</td>
-                              <td className="py-2.5 px-2">{renderCell(cagr['7Y'])}</td>
-                              <td className="py-2.5 px-2">{renderCell(cagr['10Y'])}</td>
+                              <td className="py-2.5 px-2">{renderCell('3M')}</td>
+                              <td className="py-2.5 px-2">{renderCell('6M')}</td>
+                              <td className="py-2.5 px-2">{renderCell('1Y')}</td>
+                              <td className="py-2.5 px-2">{renderCell('3Y')}</td>
+                              <td className="py-2.5 px-2">{renderCell('5Y')}</td>
+                              <td className="py-2.5 px-2">{renderCell('7Y')}</td>
+                              <td className="py-2.5 px-2">{renderCell('10Y')}</td>
                             </tr>
                           );
                         })}
                         <tr className="bg-amber-950/20 font-semibold border-t-2 border-slate-700">
                           <td className="py-2.5 text-left font-sans text-amber-300">
-                            {activeBenchmark.name} (Bench)
+                            {benchmarkStatus.name} (Bench)
                           </td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">
-                            {benchmarkCagr['3M'] !== undefined ? `${benchmarkCagr['3M'] > 0 ? '+' : ''}${benchmarkCagr['3M'].toFixed(2)}%` : 'N/A'}
-                          </td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">
-                            {benchmarkCagr['6M'] !== undefined ? `${benchmarkCagr['6M'] > 0 ? '+' : ''}${benchmarkCagr['6M'].toFixed(2)}%` : 'N/A'}
-                          </td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">
-                            {benchmarkCagr['1Y'] !== undefined ? `${benchmarkCagr['1Y'] > 0 ? '+' : ''}${benchmarkCagr['1Y'].toFixed(2)}%` : 'N/A'}
-                          </td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">
-                            {benchmarkCagr['3Y'] !== undefined ? `${benchmarkCagr['3Y'] > 0 ? '+' : ''}${benchmarkCagr['3Y'].toFixed(2)}%` : 'N/A'}
-                          </td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">
-                            {benchmarkCagr['5Y'] !== undefined ? `${benchmarkCagr['5Y'] > 0 ? '+' : ''}${benchmarkCagr['5Y'].toFixed(2)}%` : 'N/A'}
-                          </td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">
-                            {benchmarkCagr['7Y'] !== undefined ? `${benchmarkCagr['7Y'] > 0 ? '+' : ''}${benchmarkCagr['7Y'].toFixed(2)}%` : 'N/A'}
-                          </td>
-                          <td className="py-2.5 px-2 text-amber-300 font-bold">
-                            {benchmarkCagr['10Y'] !== undefined ? `${benchmarkCagr['10Y'] > 0 ? '+' : ''}${benchmarkCagr['10Y'].toFixed(2)}%` : 'N/A'}
-                          </td>
+                          {(['3M', '6M', '1Y', '3Y', '5Y', '7Y', '10Y'] as const).map((k) => (
+                            <td key={k} className="py-2.5 px-2 text-amber-300 font-bold">
+                              {benchmarkStatus.available && benchmarkCagrMeta.values[k] !== null && benchmarkCagrMeta.values[k] !== undefined ? (
+                                formatOptNum(benchmarkCagrMeta.values[k], 2, '%', true)
+                              ) : (
+                                <span className="text-slate-500 font-normal" title={benchmarkStatus.reason || 'Unavailable'}>
+                                  Unavailable
+                                </span>
+                              )}
+                            </td>
+                          ))}
                         </tr>
                       </tbody>
                     </table>
-                  </div>
-                  <div className="text-[10px] text-slate-500 mt-2">
-                    *3M &amp; 6M are absolute cumulative returns; ≥1Y periods are annualized compound rates (CAGR). N/A denotes fund age is shorter than period.
                   </div>
                 </div>
 
@@ -788,13 +931,15 @@ export default function App() {
                       </div>
                     </div>
                     <p className="text-xs text-slate-400 mb-4">
-                      Percentage of continuous {rollingWindowYears}-year rolling windows beating {activeBenchmark.name}.
+                      {benchmarkStatus.available
+                        ? `Percentage of ${rollingWindowYears}Y rolling windows beating ${benchmarkStatus.name}.`
+                        : `Unavailable — ${benchmarkStatus.reason}`}
                     </p>
 
                     <div className="space-y-3.5">
                       {rollingAnalysis.fundsRolling.map((fund) => {
                         const hit = fund.hitRate;
-                        const isAvailable = hit !== undefined && fund.dist.count > 0;
+                        const isAvailable = hit !== null && fund.dist.available;
                         return (
                           <div key={fund.code} className="space-y-1">
                             <div className="flex items-center justify-between text-xs">
@@ -802,7 +947,16 @@ export default function App() {
                                 {fund.name}
                               </span>
                               <span className="font-mono font-bold text-emerald-400">
-                                {isAvailable ? `${hit.toFixed(1)}%` : <span className="text-slate-500 font-normal">N/A (insufficient data)</span>}
+                                {isAvailable ? (
+                                  `${hit.toFixed(1)}%`
+                                ) : (
+                                  <span
+                                    className="text-slate-500 font-normal"
+                                    title={fund.dist.unavailableReason || benchmarkStatus.reason || 'Unavailable'}
+                                  >
+                                    Unavailable
+                                  </span>
+                                )}
                               </span>
                             </div>
                             <div className="w-full bg-slate-800 rounded-full h-2.5 overflow-hidden">
@@ -825,12 +979,14 @@ export default function App() {
                   </div>
 
                   <div className="mt-4 pt-3 border-t border-slate-800 text-[11px] text-slate-500">
-                    Evaluated over {rollingAnalysis.benchDist.count} continuous rolling trading windows.
+                    {benchmarkStatus.available
+                      ? `Evaluated over ${rollingAnalysis.benchDist.count} rolling benchmark trading windows.`
+                      : 'Benchmark rolling windows unavailable until verified TRI source is connected.'}
                   </div>
                 </div>
               </div>
 
-              {/* Complete Rolling Return Distributions Summary Table */}
+              {/* Rolling Return Distributions Table & BoxPlot */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                 <div className="flex items-center justify-between mb-2">
                   <div>
@@ -838,7 +994,7 @@ export default function App() {
                       {rollingWindowYears}-Year Rolling Return Distribution &amp; Statistical Spread
                     </h3>
                     <p className="text-xs text-slate-400">
-                      Mean (Average), Median, Minimum, Maximum, 25th / 75th Percentile IQR, and Positive Windows probability.
+                      Evaluated across clean rolling windows (corporate-action break-spanning windows quarantined).
                     </p>
                   </div>
                 </div>
@@ -864,49 +1020,60 @@ export default function App() {
                           <td className="py-2.5 text-left font-sans text-slate-200 font-medium truncate max-w-[180px]">
                             {f.name}
                           </td>
-                          {f.dist.count > 0 ? (
+                          {f.dist.available && f.dist.count > 0 ? (
                             <>
-                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{f.dist.mean.toFixed(2)}%</td>
-                              <td className="py-2.5 px-2 text-white font-bold">{f.dist.median.toFixed(2)}%</td>
-                              <td className="py-2.5 px-2 text-rose-400">{f.dist.min.toFixed(2)}%</td>
-                              <td className="py-2.5 px-2 text-sky-400 font-bold">{f.dist.max.toFixed(2)}%</td>
-                              <td className="py-2.5 px-2 text-slate-300">{f.dist.q25.toFixed(2)}%</td>
-                              <td className="py-2.5 px-2 text-slate-300">{f.dist.q75.toFixed(2)}%</td>
-                              <td className="py-2.5 px-2 text-slate-400">{f.dist.std.toFixed(2)}%</td>
-                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{f.dist.pctPositive.toFixed(1)}%</td>
+                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{formatOptNum(f.dist.mean, 2, '%')}</td>
+                              <td className="py-2.5 px-2 text-white font-bold">{formatOptNum(f.dist.median, 2, '%')}</td>
+                              <td className="py-2.5 px-2 text-rose-400">{formatOptNum(f.dist.min, 2, '%')}</td>
+                              <td className="py-2.5 px-2 text-sky-400 font-bold">{formatOptNum(f.dist.max, 2, '%')}</td>
+                              <td className="py-2.5 px-2 text-slate-300">{formatOptNum(f.dist.q25, 2, '%')}</td>
+                              <td className="py-2.5 px-2 text-slate-300">{formatOptNum(f.dist.q75, 2, '%')}</td>
+                              <td className="py-2.5 px-2 text-slate-400">{formatOptNum(f.dist.std, 2, '%')}</td>
+                              <td className="py-2.5 px-2 text-emerald-400 font-bold">{formatOptNum(f.dist.pctPositive, 1, '%')}</td>
                             </>
                           ) : (
                             <td colSpan={8} className="py-2.5 px-2 text-center text-slate-500 font-sans italic">
-                              N/A (Fund history is shorter than {rollingWindowYears} years)
+                              Unavailable ({f.dist.unavailableReason || `Insufficient clean windows for ${rollingWindowYears}Y`})
                             </td>
                           )}
                         </tr>
                       ))}
                       <tr className="bg-amber-950/20 font-semibold border-t border-slate-700">
                         <td className="py-2.5 text-left font-sans text-amber-300">
-                          {activeBenchmark.name} (Bench)
+                          {benchmarkStatus.name} (Bench)
                         </td>
-                        <td className="py-2.5 px-2 text-amber-300">{rollingAnalysis.benchDist.mean.toFixed(2)}%</td>
-                        <td className="py-2.5 px-2 text-amber-300">{rollingAnalysis.benchDist.median.toFixed(2)}%</td>
-                        <td className="py-2.5 px-2 text-rose-400">{rollingAnalysis.benchDist.min.toFixed(2)}%</td>
-                        <td className="py-2.5 px-2 text-amber-300">{rollingAnalysis.benchDist.max.toFixed(2)}%</td>
-                        <td className="py-2.5 px-2 text-amber-300">{rollingAnalysis.benchDist.q25.toFixed(2)}%</td>
-                        <td className="py-2.5 px-2 text-amber-300">{rollingAnalysis.benchDist.q75.toFixed(2)}%</td>
-                        <td className="py-2.5 px-2 text-slate-400">{rollingAnalysis.benchDist.std.toFixed(2)}%</td>
-                        <td className="py-2.5 px-2 text-emerald-400 font-bold">{rollingAnalysis.benchDist.pctPositive.toFixed(1)}%</td>
+                        {benchmarkStatus.available && rollingAnalysis.benchDist.available ? (
+                          <>
+                            <td className="py-2.5 px-2 text-amber-300">{formatOptNum(rollingAnalysis.benchDist.mean, 2, '%')}</td>
+                            <td className="py-2.5 px-2 text-amber-300">{formatOptNum(rollingAnalysis.benchDist.median, 2, '%')}</td>
+                            <td className="py-2.5 px-2 text-rose-400">{formatOptNum(rollingAnalysis.benchDist.min, 2, '%')}</td>
+                            <td className="py-2.5 px-2 text-amber-300">{formatOptNum(rollingAnalysis.benchDist.max, 2, '%')}</td>
+                            <td className="py-2.5 px-2 text-amber-300">{formatOptNum(rollingAnalysis.benchDist.q25, 2, '%')}</td>
+                            <td className="py-2.5 px-2 text-amber-300">{formatOptNum(rollingAnalysis.benchDist.q75, 2, '%')}</td>
+                            <td className="py-2.5 px-2 text-slate-400">{formatOptNum(rollingAnalysis.benchDist.std, 2, '%')}</td>
+                            <td className="py-2.5 px-2 text-emerald-400 font-bold">{formatOptNum(rollingAnalysis.benchDist.pctPositive, 1, '%')}</td>
+                          </>
+                        ) : (
+                          <td colSpan={8} className="py-2.5 px-2 text-center text-slate-500 font-sans italic font-normal">
+                            Unavailable ({benchmarkStatus.reason})
+                          </td>
+                        )}
                       </tr>
                     </tbody>
                   </table>
                 </div>
 
-                {/* Box Plot Visualizer */}
                 <RollingBoxPlot
                   distributions={[
-                    {
-                      name: activeBenchmark.name,
-                      dist: rollingAnalysis.benchDist,
-                      color: '#f59e0b',
-                    },
+                    ...(benchmarkStatus.available
+                      ? [
+                          {
+                            name: benchmarkStatus.name,
+                            dist: rollingAnalysis.benchDist,
+                            color: '#f59e0b',
+                          },
+                        ]
+                      : []),
                     ...rollingAnalysis.fundsRolling.map((f) => ({
                       name: f.name,
                       dist: f.dist,
@@ -918,18 +1085,15 @@ export default function App() {
             </div>
           )}
 
-          {/* ========================================================= */}
-          {/* TAB 2: RISK & ALPHA ENGINE                                */}
-          {/* ========================================================= */}
+          {/* TAB 2: RISK & ALPHA ENGINE */}
           {activeTab === 'risk' && (
             <div className="space-y-6">
-              {/* Comprehensive Risk Matrix */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                 <div className="flex items-center justify-between mb-3">
                   <div>
                     <h2 className="text-base font-bold text-white tracking-tight">Risk-Adjusted Ratios &amp; Active Alpha</h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Evaluated against {activeBenchmark.name} at Risk-Free Rate = {rfRate.toFixed(2)}%.
+                      Rf Applied = {rfRate.toFixed(2)}% · Benchmark = {benchmarkStatus.name} ({benchmarkStatus.available ? benchmarkStatus.variant : 'Unavailable'})
                     </p>
                   </div>
                 </div>
@@ -954,52 +1118,82 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60">
-                      {riskMetricsList.map((m) => (
-                        <tr key={m.schemeCode} className="hover:bg-slate-800/40">
-                          <td className="py-3 text-left font-sans text-slate-200 font-medium truncate max-w-[180px]">
-                            {m.fundName}
-                          </td>
-                          <td className="py-3 px-2 text-emerald-400 font-bold">{m.cagr.toFixed(2)}%</td>
-                          <td className="py-3 px-2 text-slate-300">{m.volatility.toFixed(2)}%</td>
-                          <td className="py-3 px-2 font-bold text-sky-400">{m.sharpe.toFixed(2)}</td>
-                          <td className="py-3 px-2 font-bold text-emerald-400">{m.sortino.toFixed(2)}</td>
-                          <td className="py-3 px-2 text-slate-300">{m.beta.toFixed(2)}</td>
-                          <td className={`py-3 px-2 font-bold ${m.jensensAlpha >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {m.jensensAlpha > 0 ? `+${m.jensensAlpha.toFixed(2)}%` : `${m.jensensAlpha.toFixed(2)}%`}
-                          </td>
-                          <td className="py-3 px-2 text-slate-300">{m.rSquared.toFixed(3)}</td>
-                          <td className="py-3 px-2 text-slate-300">{m.trackingError.toFixed(2)}%</td>
-                          <td className="py-3 px-2 font-bold text-amber-400">{m.informationRatio.toFixed(2)}</td>
-                          <td className="py-3 px-2 text-rose-400 font-semibold">{m.maxDrawdown.toFixed(2)}%</td>
-                          <td className="py-3 px-2 text-emerald-400 font-bold">{m.calmarRatio.toFixed(2)}</td>
-                          <td className="py-3 px-2 text-slate-300">
-                            <span className="text-emerald-400">{m.upsideCapture}%</span> / <span className="text-amber-400">{m.downsideCapture}%</span>
-                          </td>
-                        </tr>
-                      ))}
+                      {riskMetricsList.map((m) => {
+                        const cellNull = (reason?: string) => (
+                          <span className="text-slate-500 font-normal" title={reason || 'Unavailable'}>
+                            Unavailable
+                          </span>
+                        );
+                        return (
+                          <tr key={m.schemeCode} className="hover:bg-slate-800/40">
+                            <td className="py-3 text-left font-sans text-slate-200 font-medium truncate max-w-[180px]">
+                              {m.fundName}
+                            </td>
+                            <td className="py-3 px-2 text-emerald-400 font-bold">
+                              {m.cagr !== null ? formatOptNum(m.cagr, 2, '%') : cellNull(m.unavailableReasons.fundOnly || m.unavailableReasons.corporateAction)}
+                            </td>
+                            <td className="py-3 px-2 text-slate-300">
+                              {m.volatility !== null ? formatOptNum(m.volatility, 2, '%') : cellNull(m.unavailableReasons.fundOnly || m.unavailableReasons.corporateAction)}
+                            </td>
+                            <td className="py-3 px-2 font-bold text-sky-400">
+                              {m.sharpe !== null ? formatOptNum(m.sharpe, 2) : cellNull(m.unavailableReasons.sharpe || m.unavailableReasons.fundOnly)}
+                            </td>
+                            <td className="py-3 px-2 font-bold text-emerald-400">
+                              {m.sortino !== null ? formatOptNum(m.sortino, 2) : cellNull(m.unavailableReasons.sortino || m.unavailableReasons.fundOnly)}
+                            </td>
+                            <td className="py-3 px-2 text-slate-300">
+                              {m.beta !== null ? formatOptNum(m.beta, 2) : cellNull(m.unavailableReasons.beta || m.unavailableReasons.benchmark)}
+                            </td>
+                            <td className={`py-3 px-2 font-bold ${m.jensensAlpha !== null && m.jensensAlpha >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {m.jensensAlpha !== null ? formatOptNum(m.jensensAlpha, 2, '%', true) : cellNull(m.unavailableReasons.jensensAlpha || m.unavailableReasons.benchmark)}
+                            </td>
+                            <td className="py-3 px-2 text-slate-300">
+                              {m.rSquared !== null ? formatOptNum(m.rSquared, 3) : cellNull(m.unavailableReasons.rSquared || m.unavailableReasons.benchmark)}
+                            </td>
+                            <td className="py-3 px-2 text-slate-300">
+                              {m.trackingError !== null ? formatOptNum(m.trackingError, 2, '%') : cellNull(m.unavailableReasons.benchmark)}
+                            </td>
+                            <td className="py-3 px-2 font-bold text-amber-400">
+                              {m.informationRatio !== null ? formatOptNum(m.informationRatio, 2) : cellNull(m.unavailableReasons.informationRatio || m.unavailableReasons.benchmark)}
+                            </td>
+                            <td className="py-3 px-2 text-rose-400 font-semibold">
+                              {m.maxDrawdown !== null ? formatOptNum(m.maxDrawdown, 2, '%') : cellNull(m.unavailableReasons.fundOnly || m.unavailableReasons.corporateAction)}
+                            </td>
+                            <td className="py-3 px-2 text-emerald-400 font-bold">
+                              {m.calmarRatio !== null ? formatOptNum(m.calmarRatio, 2) : cellNull(m.unavailableReasons.calmarRatio || m.unavailableReasons.fundOnly)}
+                            </td>
+                            <td className="py-3 px-2 text-slate-300">
+                              {m.upsideCapture !== null || m.downsideCapture !== null ? (
+                                <>
+                                  <span className="text-emerald-400">{m.upsideCapture !== null ? `${m.upsideCapture}%` : 'Unavailable'}</span>
+                                  {' / '}
+                                  <span className="text-amber-400">{m.downsideCapture !== null ? `${m.downsideCapture}%` : 'Unavailable'}</span>
+                                </>
+                              ) : (
+                                cellNull(m.unavailableReasons.benchmark)
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
               </div>
 
-              {/* Capture Ratio & Beta/Alpha Quadrants */}
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
-                  <h3 className="text-sm font-bold text-white mb-1">
-                    Upside vs. Downside Capture Ratio Quadrant
-                  </h3>
+                  <h3 className="text-sm font-bold text-white mb-1">Upside vs. Downside Capture Ratio Quadrant</h3>
                   <p className="text-xs text-slate-400 mb-3">
-                    Assesses asymmetry: Ability to outrun the benchmark in bull runs while falling less in bear phases.
+                    Benchmark-relative capture asymmetry (requires independent verified benchmark).
                   </p>
                   <CaptureRatioQuadrant metrics={riskMetricsList} />
                 </div>
 
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
-                  <h3 className="text-sm font-bold text-white mb-1">
-                    Beta vs. Jensen&apos;s Alpha Scatter
-                  </h3>
+                  <h3 className="text-sm font-bold text-white mb-1">Beta vs. Jensen&apos;s Alpha Scatter</h3>
                   <p className="text-xs text-slate-400 mb-3">
-                    Bubble radius proportional to Information Ratio. Benchmark anchored at (1.0, 0%).
+                    Bubble radius proportional to Information Ratio.
                   </p>
                   <BubbleScatterPlot metrics={riskMetricsList} />
                 </div>
@@ -1007,109 +1201,114 @@ export default function App() {
             </div>
           )}
 
-          {/* ========================================================= */}
-          {/* TAB 3: ISIN OVERLAP & RETURN CORRELATION                  */}
-          {/* ========================================================= */}
+          {/* TAB 3: ISIN OVERLAP & CORRELATION */}
           {activeTab === 'overlap' && (
             <div className="space-y-6">
-              {/* Pairwise ISIN Overlap Heatmap */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                 <div className="mb-3">
                   <h2 className="text-base font-bold text-white tracking-tight">Pairwise ISIN-Level Holding Overlap Matrix</h2>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Overlap % = ∑ min(Weight_Fund_A, Weight_Fund_B) across all shared securities. Identifies hidden stock concentration.
+                    Excludes cash &amp; TREPS; schemes without ingested disclosures report &ldquo;Unavailable&rdquo;. Genuine 0.0% indicates verified non-cash portfolios with no common stocks.
                   </p>
                 </div>
 
-                <OverlapHeatmap names={overlapData.names} matrix={overlapData.matrix} />
+                <OverlapHeatmap
+                  available={overlapData.overlapAvailable}
+                  reason={overlapData.overlapReason}
+                  names={overlapData.names}
+                  matrix={overlapData.matrix}
+                />
               </div>
 
-              {/* Daily Return Correlation Matrix */}
               <CorrelationHeatmap
+                available={overlapData.corrAvailable}
+                reason={overlapData.corrReason}
                 names={overlapData.corrNames}
                 matrix={overlapData.corrMatrix}
                 diversificationScore={overlapData.diversificationScore}
               />
 
-              {/* Look-through Allocations */}
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                {/* Market Cap Exposure */}
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
-                  <h3 className="text-sm font-bold text-white mb-1">
-                    Look-Through Market-Cap Breakdown
-                  </h3>
-                  <p className="text-xs text-slate-400 mb-4">Aggregate underlying capitalization across portfolio.</p>
+                  <h3 className="text-sm font-bold text-white mb-1">Look-Through Market-Cap Breakdown</h3>
+                  <p className="text-xs text-slate-400 mb-4">Aggregate disclosed market-cap allocation across sourced portfolios.</p>
 
-                  <div className="space-y-3">
-                    {overlapData.mcapExposure.map((item) => (
-                      <div key={item.segment} className="space-y-1">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-slate-300 font-medium">{item.segment}</span>
-                          <span className="font-mono font-bold text-slate-200">{item.weight.toFixed(1)}%</span>
-                        </div>
-                        <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
-                          <div
-                            className="h-full rounded-full"
-                            style={{
-                              width: `${item.weight}%`,
-                              backgroundColor:
-                                item.segment === 'Large Cap'
-                                  ? '#38bdf8'
-                                  : item.segment === 'Mid Cap'
-                                  ? '#10b981'
-                                  : item.segment === 'Small Cap'
-                                  ? '#f59e0b'
-                                  : '#8b5cf6',
-                            }}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Sector Concentrations */}
-                <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
-                  <h3 className="text-sm font-bold text-white mb-1">Top Sector Concentrations</h3>
-                  <p className="text-xs text-slate-400 mb-4">Look-through industry sector exposures.</p>
-
-                  <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
-                    {overlapData.sectorExposure.slice(0, 8).map((item) => (
-                      <div key={item.sector} className="flex items-center justify-between text-xs">
-                        <span className="text-slate-300 font-medium truncate max-w-[200px]">
-                          {item.sector}
-                        </span>
-                        <div className="flex items-center gap-3">
-                          <div className="w-28 bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                  {overlapData.mcapExposure.available ? (
+                    <div className="space-y-3">
+                      {overlapData.mcapExposure.segments.map((item) => (
+                        <div key={item.segment} className="space-y-1">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-slate-300 font-medium">{item.segment}</span>
+                            <span className="font-mono font-bold text-slate-200">{item.weight.toFixed(1)}%</span>
+                          </div>
+                          <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
                             <div
-                              className="h-full bg-emerald-500 rounded-full"
-                              style={{ width: `${Math.min(100, item.weight * 2.5)}%` }}
+                              className="h-full rounded-full"
+                              style={{
+                                width: `${item.weight}%`,
+                                backgroundColor:
+                                  item.segment === 'Large Cap'
+                                    ? '#38bdf8'
+                                    : item.segment === 'Mid Cap'
+                                    ? '#10b981'
+                                    : item.segment === 'Small Cap'
+                                    ? '#f59e0b'
+                                    : '#8b5cf6',
+                              }}
                             />
                           </div>
-                          <span className="font-mono font-semibold text-slate-200 w-12 text-right">
-                            {item.weight.toFixed(1)}%
-                          </span>
                         </div>
-                      </div>
-                    ))}
-                  </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-slate-400">
+                      {overlapData.mcapExposure.reason}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
+                  <h3 className="text-sm font-bold text-white mb-1">Top Sector Concentrations</h3>
+                  <p className="text-xs text-slate-400 mb-4">Look-through industry sector exposures from verified holdings.</p>
+
+                  {overlapData.sectorExposure.available ? (
+                    <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+                      {overlapData.sectorExposure.sectors.slice(0, 8).map((item) => (
+                        <div key={item.sector} className="flex items-center justify-between text-xs">
+                          <span className="text-slate-300 font-medium truncate max-w-[200px]">{item.sector}</span>
+                          <div className="flex items-center gap-3">
+                            <div className="w-28 bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                              <div
+                                className="h-full bg-emerald-500 rounded-full"
+                                style={{ width: `${Math.min(100, item.weight * 2.5)}%` }}
+                              />
+                            </div>
+                            <span className="font-mono font-semibold text-slate-200 w-12 text-right">
+                              {item.weight.toFixed(1)}%
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-slate-400">
+                      {overlapData.sectorExposure.reason}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
           )}
 
-          {/* ========================================================= */}
-          {/* TAB 4: DEBT & LIQUIDITY STRESS TESTING                   */}
-          {/* ========================================================= */}
+          {/* TAB 4: DEBT & LIQUIDITY STRESS */}
           {activeTab === 'stress' && (
             <div className="space-y-6">
-              {/* Liquidity Stress Section */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-4">
                   <div>
-                    <h2 className="text-base font-bold text-white tracking-tight">Portfolio Liquidity Stress Testing</h2>
+                    <h2 className="text-base font-bold text-white tracking-tight">Modeled Portfolio Liquidity Stress</h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      SEBI liquidity stress horizon: Days to liquidate 25% and 50% under {adtvParticipation}% 30-day ADTV participation limit.
+                      Scenario model under {adtvParticipation}% 30D ADTV limit (requires sourced holdings &amp; exchange ADTV).
                     </p>
                   </div>
 
@@ -1129,11 +1328,17 @@ export default function App() {
                   </div>
                 </div>
 
+                {!liquidityResult.available && (
+                  <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-800/60 text-xs text-amber-200">
+                    {liquidityResult.reason}
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl">
                     <div className="text-[11px] text-slate-400 uppercase font-medium">Fund AUM</div>
                     <div className="text-xl font-bold font-mono text-white mt-1">
-                      ₹{targetStressFund.aum_cr.toLocaleString()} Cr
+                      {targetStressFund.aum_cr !== null ? `₹${targetStressFund.aum_cr.toLocaleString()} Cr` : 'Unavailable'}
                     </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">{targetStressFund.category}</div>
                   </div>
@@ -1141,119 +1346,113 @@ export default function App() {
                   <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl">
                     <div className="text-[11px] text-slate-400 uppercase font-medium">Days to Liquidate 25%</div>
                     <div className="text-xl font-bold font-mono text-emerald-400 mt-1">
-                      {liquidityResult.days25Waterfall} Days
+                      {liquidityResult.available && liquidityResult.days25Waterfall !== null
+                        ? `${liquidityResult.days25Waterfall} Days`
+                        : 'Unavailable'}
                     </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">
-                      Pro-Rata: {liquidityResult.days25Prorata} Days
+                      Pro-Rata:{' '}
+                      {liquidityResult.available && liquidityResult.days25Prorata !== null
+                        ? `${liquidityResult.days25Prorata} Days`
+                        : 'Unavailable'}
                     </div>
                   </div>
 
                   <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl">
                     <div className="text-[11px] text-slate-400 uppercase font-medium">Days to Liquidate 50%</div>
                     <div className="text-xl font-bold font-mono text-amber-400 mt-1">
-                      {liquidityResult.days50Waterfall} Days
+                      {liquidityResult.available && liquidityResult.days50Waterfall !== null
+                        ? `${liquidityResult.days50Waterfall} Days`
+                        : 'Unavailable'}
                     </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">
-                      Pro-Rata: {liquidityResult.days50Prorata} Days
+                      Pro-Rata:{' '}
+                      {liquidityResult.available && liquidityResult.days50Prorata !== null
+                        ? `${liquidityResult.days50Prorata} Days`
+                        : 'Unavailable'}
                     </div>
                   </div>
 
                   <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl">
                     <div className="text-[11px] text-slate-400 uppercase font-medium">Illiquid Basket (&gt;10d)</div>
                     <div className="text-xl font-bold font-mono text-rose-400 mt-1">
-                      {liquidityResult.pctIlliquidOver10Days.toFixed(1)}%
+                      {liquidityResult.available && liquidityResult.pctIlliquidOver10Days !== null
+                        ? `${liquidityResult.pctIlliquidOver10Days.toFixed(1)}%`
+                        : 'Unavailable'}
                     </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">
-                      Under 3 Days: {liquidityResult.pctLiquidUnder3Days.toFixed(1)}%
+                      Under 3 Days:{' '}
+                      {liquidityResult.available && liquidityResult.pctLiquidUnder3Days !== null
+                        ? `${liquidityResult.pctLiquidUnder3Days.toFixed(1)}%`
+                        : 'Unavailable'}
                     </div>
                   </div>
                 </div>
 
-                {/* Stock Level Liquidity Table */}
-                <div className="overflow-x-auto mt-2">
-                  <table className="w-full text-xs font-mono">
-                    <thead>
-                      <tr className="border-b border-slate-800 text-slate-400 font-sans text-left">
-                        <th className="py-2">ISIN</th>
-                        <th className="py-2">Holding Name</th>
-                        <th className="py-2 text-right">Weight</th>
-                        <th className="py-2 text-right">Position (₹ Cr)</th>
-                        <th className="py-2 text-right">30D ADTV</th>
-                        <th className="py-2 text-right">Days to 100% Exit</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800/60">
-                      {liquidityResult.holdings.slice(0, 8).map((h) => (
-                        <tr key={h.isin} className="hover:bg-slate-800/40">
-                          <td className="py-2 text-slate-400">{h.isin}</td>
-                          <td className="py-2 font-sans text-slate-200 font-medium">{h.name}</td>
-                          <td className="py-2 text-right text-slate-300">{h.weight.toFixed(2)}%</td>
-                          <td className="py-2 text-right text-slate-300 font-semibold">₹{h.positionCr.toFixed(1)}</td>
-                          <td className="py-2 text-right text-slate-400">₹{h.adtvCr.toFixed(0)} Cr</td>
-                          <td className="py-2 text-right">
-                            <span
-                              className={`px-2 py-0.5 rounded text-[11px] font-bold ${
-                                h.daysToLiquidate > 10
-                                  ? 'bg-rose-950/80 text-rose-300 border border-rose-900/60'
-                                  : h.daysToLiquidate > 3
-                                  ? 'bg-amber-950/60 text-amber-300 border border-amber-900/50'
-                                  : 'bg-emerald-950/50 text-emerald-300 border border-emerald-900/40'
-                              }`}
-                            >
-                              {h.daysToLiquidate.toFixed(1)} d
-                            </span>
-                          </td>
+                {liquidityResult.holdings.length > 0 && (
+                  <div className="overflow-x-auto mt-2">
+                    <table className="w-full text-xs font-mono">
+                      <thead>
+                        <tr className="border-b border-slate-800 text-slate-400 font-sans text-left">
+                          <th className="py-2">ISIN</th>
+                          <th className="py-2">Holding Name</th>
+                          <th className="py-2 text-right">Weight</th>
+                          <th className="py-2 text-right">Position (₹ Cr)</th>
+                          <th className="py-2 text-right">30D ADTV</th>
+                          <th className="py-2 text-right">Days to 100% Exit</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60">
+                        {liquidityResult.holdings.slice(0, 8).map((h) => (
+                          <tr key={h.isin} className="hover:bg-slate-800/40">
+                            <td className="py-2 text-slate-400">{h.isin}</td>
+                            <td className="py-2 font-sans text-slate-200 font-medium">{h.name}</td>
+                            <td className="py-2 text-right text-slate-300">{h.weight.toFixed(2)}%</td>
+                            <td className="py-2 text-right text-slate-300 font-semibold">₹{h.positionCr.toFixed(1)}</td>
+                            <td className="py-2 text-right text-slate-400">
+                              {h.adtvCr !== null ? `₹${h.adtvCr.toFixed(0)} Cr` : 'Unavailable'}
+                            </td>
+                            <td className="py-2 text-right text-slate-400">
+                              {h.daysToLiquidate !== null ? `${h.daysToLiquidate.toFixed(1)} d` : 'Unavailable'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
 
-              {/* Debt Duration & Yield Curve Sensitivity */}
+              {/* Debt Duration Shock Engine */}
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h3 className="text-sm font-bold text-white">
-                      Debt Duration &amp; Yield Curve Shock Engine
-                    </h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Macaulay &amp; Modified Duration simulation with second-order Convexity adjustments.
-                    </p>
-                  </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Debt Duration &amp; Yield Curve Shock Engine</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Requires sourced Macaulay Duration and YTM (placeholder debt defaults disabled).
+                  </p>
                 </div>
 
-                <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                  {/* Standard Shock Table */}
-                  <div className="space-y-3">
-                    <div className="text-xs font-semibold text-slate-300">
-                      Standard Rate Shock Scenarios (Base NAV = ₹100.00)
-                    </div>
+                {durationResult.available && customShockResult.available ? (
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                     <div className="overflow-x-auto">
                       <table className="w-full text-xs font-mono text-right">
                         <thead>
                           <tr className="border-b border-slate-800 text-slate-400 font-sans">
                             <th className="py-2 text-left">Yield Shift</th>
                             <th className="py-2 px-2">Duration Effect</th>
-                            <th className="py-2 px-2">Convexity Benefit</th>
                             <th className="py-2 px-2">Total NAV Change</th>
                             <th className="py-2 px-2">Simulated NAV</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800/60">
-                          {durationShocks.map((s) => (
+                          {durationResult.points.map((s) => (
                             <tr key={s.shockBps} className="hover:bg-slate-800/40">
                               <td className="py-2 text-left font-sans text-slate-300 font-medium">
                                 {s.shockBps > 0 ? `+${s.shockBps} bps` : `${s.shockBps} bps`}
                               </td>
                               <td className="py-2 px-2 text-slate-400">{s.durationImpactPct.toFixed(2)}%</td>
-                              <td className="py-2 px-2 text-slate-400">+{s.convexityBenefitPct.toFixed(3)}%</td>
-                              <td
-                                className={`py-2 px-2 font-bold ${
-                                  s.totalNavChangePct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                                }`}
-                              >
-                                {s.totalNavChangePct > 0 ? `+${s.totalNavChangePct.toFixed(2)}%` : `${s.totalNavChangePct.toFixed(2)}%`}
+                              <td className={`py-2 px-2 font-bold ${s.totalNavChangePct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {formatOptNum(s.totalNavChangePct, 2, '%', true)}
                               </td>
                               <td className="py-2 px-2 font-bold text-white">₹{s.simulatedNav.toFixed(2)}</td>
                             </tr>
@@ -1261,68 +1460,46 @@ export default function App() {
                         </tbody>
                       </table>
                     </div>
-                  </div>
 
-                  {/* Interactive Slider Simulator */}
-                  <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-semibold text-slate-200">Interactive Yield Curve Shift</span>
-                        <span className="font-mono text-indigo-400 font-bold text-sm">
-                          {customRateShockBps > 0 ? `+${customRateShockBps}` : customRateShockBps} bps
-                        </span>
-                      </div>
-
-                      <input
-                        type="range"
-                        min="-250"
-                        max="250"
-                        step="25"
-                        value={customRateShockBps}
-                        onChange={(e) => setCustomRateShockBps(parseInt(e.target.value, 10))}
-                        className="w-full accent-indigo-500 cursor-pointer mb-4"
-                      />
-
-                      <div className="p-4 bg-slate-900 border border-slate-800 rounded-lg text-center space-y-1">
-                        <div className="text-xs text-slate-400 uppercase font-medium">Simulated Portfolio NAV Impact</div>
-                        <div
-                          className={`text-2xl font-bold font-mono ${
-                            customShockResult.totalImpactPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                          }`}
-                        >
-                          {customShockResult.totalImpactPct > 0
-                            ? `+${customShockResult.totalImpactPct.toFixed(2)}%`
-                            : `${customShockResult.totalImpactPct.toFixed(2)}%`}
+                    <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-semibold text-slate-200">Interactive Yield Curve Shift</span>
+                          <span className="font-mono text-indigo-400 font-bold text-sm">
+                            {customRateShockBps > 0 ? `+${customRateShockBps}` : customRateShockBps} bps
+                          </span>
                         </div>
-                        <div className="text-xs font-mono text-slate-300 font-medium">
-                          Simulated NAV: ₹{customShockResult.simulatedNav.toFixed(2)}
+                        <input
+                          type="range"
+                          min="-250"
+                          max="250"
+                          step="25"
+                          value={customRateShockBps}
+                          onChange={(e) => setCustomRateShockBps(parseInt(e.target.value, 10))}
+                          className="w-full accent-indigo-500 cursor-pointer mb-4"
+                        />
+                        <div className="p-4 bg-slate-900 border border-slate-800 rounded-lg text-center space-y-1">
+                          <div className="text-xs text-slate-400 uppercase font-medium">First-Order Duration Impact</div>
+                          <div className={`text-2xl font-bold font-mono ${customShockResult.durImpactPct! >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {formatOptNum(customShockResult.durImpactPct, 2, '%', true)}
+                          </div>
+                          <div className="text-xs font-mono text-slate-300">
+                            Simulated NAV: ₹{customShockResult.simulatedNav!.toFixed(2)}
+                          </div>
                         </div>
                       </div>
                     </div>
-
-                    <div className="mt-4 pt-3 border-t border-slate-800 text-[11px] text-slate-400 space-y-1">
-                      <div className="flex justify-between">
-                        <span>Modified Duration (D_mod):</span>
-                        <span className="font-mono text-slate-200">{customShockResult.modDur.toFixed(2)} yrs</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>1st-Order Duration Effect:</span>
-                        <span className="font-mono text-slate-200">{customShockResult.durImpactPct.toFixed(2)}%</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>2nd-Order Convexity Adjustment:</span>
-                        <span className="font-mono text-slate-200">+{customShockResult.cvxBenefitPct.toFixed(3)}%</span>
-                      </div>
-                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-slate-400">
+                    {durationResult.reason}
+                  </div>
+                )}
               </div>
             </div>
           )}
 
-          {/* ========================================================= */}
-          {/* TAB 5: SIP WEALTH SIMULATOR & XIRR ENGINE                 */}
-          {/* ========================================================= */}
+          {/* TAB 5: SIP SIMULATOR */}
           {activeTab === 'sip' && (
             <div className="space-y-6">
               <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
@@ -1330,7 +1507,7 @@ export default function App() {
                   <div>
                     <h2 className="text-base font-bold text-white tracking-tight">Systematic Investment Plan (SIP) Simulator</h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Backtest rupee-cost averaging across historical daily NAV cycles and compute exact annualized XIRR.
+                      Simulated strictly on validated scheme NAVs (no benchmark substitution when scheme history is unavailable).
                     </p>
                   </div>
 
@@ -1371,17 +1548,23 @@ export default function App() {
                   <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl">
                     <div className="text-[11px] text-slate-400 uppercase font-medium">Accumulated Corpus</div>
                     <div className="text-xl font-bold font-mono text-emerald-400 mt-1">
-                      ₹{sipResult.totalCorpus.toLocaleString()}
+                      {sipResult.available && sipResult.totalCorpus !== null
+                        ? `₹${sipResult.totalCorpus.toLocaleString()}`
+                        : 'Unavailable'}
                     </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">
-                      Invested: ₹{sipResult.totalInvested.toLocaleString()} · Net Gain: +₹{sipResult.absoluteProfit.toLocaleString()}
+                      {sipResult.available && sipResult.totalInvested !== null && sipResult.absoluteProfit !== null
+                        ? `Invested: ₹${sipResult.totalInvested.toLocaleString()} · Net Gain: ₹${sipResult.absoluteProfit.toLocaleString()}`
+                        : sipResult.reason}
                     </div>
                   </div>
 
                   <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl">
                     <div className="text-[11px] text-slate-400 uppercase font-medium">Annualized XIRR</div>
                     <div className="text-xl font-bold font-mono text-indigo-400 mt-1">
-                      {sipResult.xirrPct}%
+                      {sipResult.available && sipResult.xirrPct !== null
+                        ? `${sipResult.xirrPct}%`
+                        : 'Unavailable'}
                     </div>
                     <div className="text-[10px] text-slate-500 mt-0.5">
                       Internal Rate of Return over {timeHorizon} years
@@ -1397,16 +1580,14 @@ export default function App() {
             </div>
           )}
 
-          {/* ========================================================= */}
-          {/* TAB 6: FUND FACTSHEETS & QUALITATIVE DOSSIER              */}
-          {/* ========================================================= */}
+          {/* TAB 6: FUND FACTSHEETS */}
           {activeTab === 'factsheet' && (
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-base font-bold text-white tracking-tight">Fund Factsheets &amp; Manager Dossiers</h2>
+                  <h2 className="text-base font-bold text-white tracking-tight">Fund Factsheets &amp; Verified Identity Dossiers</h2>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Official qualitative profiles, portfolio turnover, SEBI riskometer ratings, and lead manager tenures.
+                    Displays dated AMC disclosures where available; unsourced facts on discovered funds report &ldquo;Unavailable&rdquo;.
                   </p>
                 </div>
 
@@ -1415,7 +1596,7 @@ export default function App() {
                   className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition-colors flex items-center gap-1.5"
                 >
                   <Search className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>Browse More Factsheets</span>
+                  <span>Browse More Schemes</span>
                 </button>
               </div>
 
@@ -1434,7 +1615,7 @@ export default function App() {
                           </span>
                         </div>
                         <div className="text-xs text-slate-400 mt-0.5 font-mono">
-                          {fund.fund_house} · ISIN: {fund.isin}
+                          {fund.fund_house} · ISIN: {fund.isin ?? 'Unavailable'}
                         </div>
                       </div>
 
@@ -1449,31 +1630,55 @@ export default function App() {
                     <div className="grid grid-cols-3 gap-2 text-xs">
                       <div className="p-2.5 bg-slate-950/80 rounded-lg">
                         <div className="text-slate-400 text-[10px]">AUM</div>
-                        <div className="font-mono font-bold text-white mt-0.5">₹{fund.aum_cr.toLocaleString()} Cr</div>
+                        <div className="font-mono font-bold text-white mt-0.5">
+                          {fund.aum_cr !== null ? `₹${fund.aum_cr.toLocaleString()} Cr` : 'Unavailable'}
+                        </div>
                       </div>
                       <div className="p-2.5 bg-slate-950/80 rounded-lg">
                         <div className="text-slate-400 text-[10px]">TER (Direct)</div>
-                        <div className="font-mono font-bold text-emerald-400 mt-0.5">{fund.expense_ratio_direct}%</div>
+                        <div className="font-mono font-bold text-emerald-400 mt-0.5">
+                          {fund.expense_ratio_direct !== null ? `${fund.expense_ratio_direct}%` : 'Unavailable'}
+                        </div>
                       </div>
                       <div className="p-2.5 bg-slate-950/80 rounded-lg">
                         <div className="text-slate-400 text-[10px]">Turnover</div>
-                        <div className="font-mono font-bold text-amber-400 mt-0.5">{fund.turnover_ratio_pct}%</div>
+                        <div className="font-mono font-bold text-amber-400 mt-0.5">
+                          {fund.turnover_ratio_pct !== null ? `${fund.turnover_ratio_pct}%` : 'Unavailable'}
+                        </div>
                       </div>
                     </div>
 
                     <div className="p-3 bg-slate-950/60 border border-slate-800/70 rounded-lg space-y-1 text-xs">
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-slate-200">{fund.manager.name}</span>
-                        <span className="font-mono text-emerald-400 text-[11px] font-semibold">{fund.manager.tenureYears} yrs on fund</span>
-                      </div>
-                      <p className="text-slate-400 line-clamp-2 text-[11px] leading-relaxed">
-                        {fund.manager.bio}
-                      </p>
+                      {fund.manager ? (
+                        <>
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-slate-200">{fund.manager.name}</span>
+                            <span className="font-mono text-emerald-400 text-[11px] font-semibold">
+                              {fund.manager.tenureYears !== null ? `${fund.manager.tenureYears} yrs` : 'Unavailable'}
+                            </span>
+                          </div>
+                          {fund.manager.bio && (
+                            <p className="text-slate-400 line-clamp-2 text-[11px] leading-relaxed">{fund.manager.bio}</p>
+                          )}
+                        </>
+                      ) : (
+                        <div className="text-slate-500 italic text-[11px]">
+                          Fund manager profile: Unavailable (no AMC factsheet disclosure ingested)
+                        </div>
+                      )}
                     </div>
 
                     <div className="flex items-center justify-between text-xs text-slate-400 pt-1 border-t border-slate-800">
-                      <span>Riskometer: <span className="font-semibold text-rose-400">{fund.riskometer}</span></span>
-                      <span>Min SIP: <span className="font-mono font-semibold text-white">₹{fund.min_sip_inr}</span></span>
+                      <span>
+                        Riskometer:{' '}
+                        <span className="font-semibold text-slate-200">{fund.riskometer ?? 'Unavailable'}</span>
+                      </span>
+                      <span>
+                        Min SIP:{' '}
+                        <span className="font-mono font-semibold text-white">
+                          {fund.min_sip_inr !== null ? `₹${fund.min_sip_inr}` : 'Unavailable'}
+                        </span>
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -1481,9 +1686,7 @@ export default function App() {
             </div>
           )}
 
-          {/* ========================================================= */}
-          {/* TAB 7: PYTHON STREAMLIT SUITE                            */}
-          {/* ========================================================= */}
+          {/* TAB 7: PYTHON SUITE */}
           {activeTab === 'python' && (
             <div className="space-y-6">
               <PythonExporter />
@@ -1491,6 +1694,82 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Nine-Preset AMFI Reconciliation Modal */}
+      {isReconcileModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-xs font-sans">
+          <div className="relative w-full max-w-5xl max-h-[88vh] bg-[#0f172a] border border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden text-slate-100">
+            <div className="p-5 border-b border-slate-800 bg-slate-950/70 flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold text-white">
+                  Nine-Preset Reconciliation vs. AMFI Snapshot ({AMFI_SNAPSHOT_DATE})
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Audited presets vs. official AMFI identities. Cross-scheme mismatches, missing reports, and unverified plans are blocked from analytics selection.
+                </p>
+              </div>
+              <button
+                onClick={() => setIsReconcileModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto p-5">
+              <table className="w-full text-xs text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400">
+                    <th className="py-2 px-2">Code</th>
+                    <th className="py-2 px-2">Audited Preset</th>
+                    <th className="py-2 px-2">AMFI Official Match</th>
+                    <th className="py-2 px-2">Status</th>
+                    <th className="py-2 px-2">Audit Resolution Note</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/70">
+                  {Object.values(PRESET_RECONCILIATION_TABLE).map((rec) => (
+                    <tr key={rec.scheme_code} className="hover:bg-slate-900/50 align-top">
+                      <td className="py-2.5 px-2 font-mono font-bold text-indigo-400">{rec.scheme_code}</td>
+                      <td className="py-2.5 px-2">
+                        <div className="text-slate-200 font-medium">{rec.auditedPresetName}</div>
+                        <div className="font-mono text-[11px] text-slate-500">{rec.auditedPresetIsin}</div>
+                      </td>
+                      <td className="py-2.5 px-2">
+                        <div className="text-slate-200">{rec.amfiName ?? 'Absent from AMFI snapshot'}</div>
+                        <div className="font-mono text-[11px] text-slate-400">
+                          {rec.amfiIsin ?? 'No ISIN'} · {rec.amfiNav !== null ? `NAV ₹${rec.amfiNav}` : 'No NAV'}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-2">
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded font-mono text-[10px] font-bold uppercase ${
+                            rec.selectable
+                              ? 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/70'
+                              : 'bg-rose-950/70 text-rose-300 border border-rose-800/70'
+                          }`}
+                        >
+                          {rec.selectable ? rec.resolutionStatus.replace(/_/g, ' ') : 'Blocked / Unavailable'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-2 text-slate-300 max-w-xs leading-relaxed">{rec.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="p-4 border-t border-slate-800 bg-slate-950/80 flex justify-end">
+              <button
+                onClick={() => setIsReconcileModalOpen(false)}
+                className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg"
+              >
+                Close Audit Table
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Global Modals */}
       <FundSearchModal
@@ -1513,10 +1792,11 @@ export default function App() {
         onClose={() => setIsExportModalOpen(false)}
         selectedFunds={activeFundsList}
         riskMetrics={riskMetricsList}
-        trailingCagrMap={trailingCagrMap}
+        trailingMetaMap={trailingMetaMap}
         seriesMap={fundSeriesMap}
-        benchmarkSeries={benchmarkSeries}
-        benchmarkName={activeBenchmark.name}
+        validationMap={validationMap}
+        benchmarkStatus={benchmarkStatus}
+        rfRate={rfRate}
       />
     </div>
   );

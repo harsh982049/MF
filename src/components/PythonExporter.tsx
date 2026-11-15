@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Copy, Check, Download, FileCode, Terminal } from 'lucide-react';
+import { Copy, Check, Download, FileCode, Terminal, AlertTriangle } from 'lucide-react';
 
 interface FileDefinition {
   name: string;
@@ -11,7 +11,7 @@ interface FileDefinition {
 export const PYTHON_MODULES: FileDefinition[] = [
   {
     name: 'data_loader.py',
-    moduleName: 'Module 1: Ingestion Pipeline',
+    moduleName: 'Module 1: Ingestion Pipeline (Legacy Audit Quarantine)',
     description: 'Dynamic NAV ingestion from api.mfapi.in, yfinance benchmark series, and in-memory SQLite schema normalization.',
     code: `"""
 Module 1: Data Ingestion & In-Memory Caching (data_loader.py)
@@ -202,7 +202,7 @@ def get_aligned_fund_and_benchmark(scheme_codes: List[int or str], benchmark_sym
   },
   {
     name: 'quant_engine.py',
-    moduleName: 'Module 2: Quantitative Engine',
+    moduleName: 'Module 2: Quantitative Engine (Legacy Audit Quarantine)',
     description: 'Vectorized NumPy/Pandas computation of CAGR, Rolling Distributions, Hit Rates, Sharpe, Sortino, CML metrics, and Drawdowns.',
     code: `"""
 Module 2: Quantitative Risk Engine (quant_engine.py)
@@ -299,7 +299,7 @@ def compute_drawdowns(price_series: pd.Series) -> Dict[str, Any]:
   },
   {
     name: 'overlap_engine.py',
-    moduleName: 'Module 3: Overlap & Sector Engine',
+    moduleName: 'Module 3: Overlap & Sector Engine (Legacy Audit Quarantine)',
     description: 'Calculates ISIN-level weighted overlap min(W_A, W_B), pairwise matrix, and look-through market-cap and sector allocations.',
     code: `"""
 Module 3: In-Memory Portfolio Overlap & Sector Engine (overlap_engine.py)
@@ -320,13 +320,12 @@ def compute_pairwise_overlap(holdings_a: pd.DataFrame, holdings_b: pd.DataFrame,
 def compute_overlap_matrix(scheme_codes: List[int or str], exclude_cash: bool = True) -> pd.DataFrame:
     codes_str = [str(c) for c in scheme_codes]
     matrix = pd.DataFrame(index=codes_str, columns=codes_str, dtype=float)
-    # Uses sample holding database in module
     return matrix
 `,
   },
   {
     name: 'stress_test.py',
-    moduleName: 'Module 4: Debt & Liquidity Engine',
+    moduleName: 'Module 4: Debt & Liquidity Engine (Legacy Audit Quarantine)',
     description: '30-day ADTV liquidity stress horizon (25% & 50% liquidation) and Macaulay / Modified Duration rate sensitivity shock model.',
     code: `"""
 Module 4: Debt & Liquidity Stress Testing Engine (stress_test.py)
@@ -340,17 +339,15 @@ def calculate_liquidity_stress(holdings_df: pd.DataFrame, aum_crores: float = 25
     df["position_cr"] = (df["weight"] / 100.0) * aum_crores
     df["daily_absorbable_cr"] = df["adtv_cr"] * participation_rate
     df["days_to_liquidate_100pct"] = np.where(df["isin"] == "CASH_EQUIV", 0.0, df["position_cr"] / np.maximum(df["daily_absorbable_cr"], 0.1))
-    
-    # Pro-rata
+
     days_25_prorata = float(df[df["isin"] != "CASH_EQUIV"]["days_to_liquidate_100pct"].max() * 0.25)
     days_50_prorata = float(df[df["isin"] != "CASH_EQUIV"]["days_to_liquidate_100pct"].max() * 0.50)
-    
-    # Waterfall
+
     sorted_df = df.sort_values("days_to_liquidate_100pct", ascending=True)
     sorted_df["cum_weight"] = sorted_df["weight"].cumsum()
     days_25_wf = float(sorted_df[sorted_df["cum_weight"] <= 25.0]["days_to_liquidate_100pct"].max())
     days_50_wf = float(sorted_df[sorted_df["cum_weight"] <= 50.0]["days_to_liquidate_100pct"].max())
-    
+
     return {
         "days_25_prorata": round(days_25_prorata, 1),
         "days_50_prorata": round(days_50_prorata, 1),
@@ -372,8 +369,8 @@ def calculate_duration_sensitivity(macaulay_duration: float = 3.85, current_ytm:
   },
   {
     name: 'app.py',
-    moduleName: 'Module 5: Streamlit Frontend',
-    description: 'Production-ready multi-tab Streamlit dashboard with sidebar parameters, Plotly visualizations, and sample fallbacks.',
+    moduleName: 'Module 5: Streamlit Frontend (Legacy Audit Quarantine)',
+    description: 'Streamlit dashboard entry point pending Batch 3 canonical restoration.',
     code: `"""
 Module 5: Streamlit Frontend & Visualizations (app.py)
 Run with: streamlit run app.py
@@ -385,8 +382,6 @@ from data_loader import PRESET_FUNDS, BENCHMARK_SYMBOLS, get_aligned_fund_and_be
 from quant_engine import compute_trailing_cagr, compute_rolling_returns, compute_risk_ratios
 from overlap_engine import compute_overlap_matrix, aggregate_market_cap_exposure, aggregate_sector_exposure
 from stress_test import calculate_liquidity_stress, calculate_duration_sensitivity
-
-# See full source code in workspace app.py
 `,
   },
   {
@@ -436,16 +431,28 @@ export const PythonExporter: React.FC = () => {
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl">
+      {/* Audit Status Quarantine Banner (Batch 1 Item 6) */}
+      <div className="p-4 bg-rose-950/80 border-b border-rose-800/80 flex items-start gap-3 text-xs text-rose-100">
+        <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+        <div className="space-y-1">
+          <div className="font-bold text-rose-200 uppercase tracking-wider text-[11px]">
+            Audit Quarantine Notice — Legacy Python Suite Pending Batch 3 Remediation
+          </div>
+          <p className="text-rose-200/90 leading-relaxed">
+            The legacy Python modules exposed below have <span className="font-semibold">known build and data failures</span> identified during audit (including <code className="font-mono text-rose-300">MF-002</code> scheme mismatches, <code className="font-mono text-rose-300">MF-004</code> root <code className="font-mono">data_loader.py</code> syntax failure, <code className="font-mono text-rose-300">MF-005</code> synthetic random-walk NAV/benchmark fallbacks, and <code className="font-mono text-rose-300">MF-016</code> forward/backfill distortion). Python remediation and synchronized archive generation are scheduled for <span className="font-semibold">Batch 3</span>. Do not use outputs from this legacy download for investment decisions.
+          </p>
+        </div>
+      </div>
+
       {/* Module Navigation Header */}
       <div className="bg-slate-950 px-6 py-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
             <Terminal className="w-5 h-5 text-indigo-400" />
-            <h2 className="text-base font-semibold text-white">Exportable Python Streamlit Suite</h2>
+            <h2 className="text-base font-semibold text-white">Legacy Python Streamlit Suite (Pre-Batch 3)</h2>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Production modular Python code split across 5 specialized modules. Execute directly via{' '}
-            <code className="text-emerald-400 font-mono">streamlit run app.py</code>
+            Archival 5-module snapshot preserved for reference until Batch 3 canonical Python restoration.
           </p>
         </div>
 
@@ -455,23 +462,23 @@ export const PythonExporter: React.FC = () => {
             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-colors"
           >
             {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-            {copied ? 'Copied!' : 'Copy Module'}
+            {copied ? 'Copied!' : 'Copy Legacy Module'}
           </button>
 
           <button
             onClick={() => handleDownload(currentMod.name, currentMod.code)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg transition-colors shadow-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-700/60 text-xs font-medium rounded-lg transition-colors shadow-sm"
           >
             <Download className="w-4 h-4" />
-            Download {currentMod.name}
+            Download Legacy {currentMod.name}
           </button>
 
           <button
             onClick={handleDownloadAll}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-lg transition-colors shadow-sm"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-rose-300 border border-rose-700/60 text-xs font-medium rounded-lg transition-colors shadow-sm"
           >
             <Download className="w-4 h-4" />
-            Download All (5 Files)
+            Download Legacy Archive
           </button>
         </div>
       </div>
@@ -484,7 +491,7 @@ export const PythonExporter: React.FC = () => {
             onClick={() => setActiveFile(mod.name)}
             className={`flex items-center gap-2 px-3 py-1.5 rounded-lg font-mono transition-colors whitespace-nowrap ${
               activeFile === mod.name
-                ? 'bg-slate-800 text-emerald-400 border border-slate-700 shadow-sm font-semibold'
+                ? 'bg-slate-800 text-amber-300 border border-slate-700 shadow-sm font-semibold'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
             }`}
           >

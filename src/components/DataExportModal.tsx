@@ -1,17 +1,522 @@
 import React, { useState } from 'react';
 import { X, Download, FileText, FileSpreadsheet, Check, Database, Sparkles, ChevronDown } from 'lucide-react';
-import { FundMeta, NavPoint, RiskMetrics } from '../types/quant';
+import {
+  BenchmarkStatus,
+  FundMeta,
+  NavPoint,
+  NavValidationReport,
+  RiskMetrics,
+  TrailingCagrResult,
+} from '../types/quant';
 import { computeRollingReturns, computeBenchmarkHitRate } from '../utils/quantEngine';
+import { AMFI_SNAPSHOT_DATE } from '../utils/schemeIdentity';
+
+export interface ExportBuilderInput {
+  selectedFunds: FundMeta[];
+  riskMetrics: RiskMetrics[];
+  trailingMetaMap: Record<number, TrailingCagrResult>;
+  seriesMap: Record<number, NavPoint[]>;
+  validationMap: Record<number, NavValidationReport | undefined>;
+  benchmarkStatus: BenchmarkStatus;
+  rfRate: number;
+  exportTimestamp?: string;
+}
+
+const sanitizeFilenamePart = (name: string): string =>
+  name
+    .replace(/[^a-zA-Z0-9\s]/g, '')
+    .trim()
+    .replace(/\s+/g, '_');
+
+const csvText = (value: string | null | undefined): string => {
+  if (value === null || value === undefined || value === '') return '"Unavailable"';
+  const raw = String(value);
+  const formulaPrefix = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  return `"${formulaPrefix.replace(/"/g, '""')}"`;
+};
+
+const csvNum = (value: number | null | undefined, suffix: string = ''): string => {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '"Unavailable"';
+  return suffix ? `"${value}${suffix}"` : String(value);
+};
+
+const getRollingAnalyticsForFund = (
+  series: NavPoint[],
+  validation: NavValidationReport | undefined,
+  benchmarkStatus: BenchmarkStatus
+) => {
+  const breaks = validation?.corporateActionBreaks;
+  const r1 = computeRollingReturns(series, 1.0, 252, breaks);
+  const r3 = computeRollingReturns(series, 3.0, 252, breaks);
+  const r5 = computeRollingReturns(series, 5.0, 252, breaks);
+  const r7 = computeRollingReturns(series, 7.0, 252, breaks);
+
+  const bSeries = benchmarkStatus.available ? benchmarkStatus.series : [];
+  const b1 = computeRollingReturns(bSeries, 1.0);
+  const b3 = computeRollingReturns(bSeries, 3.0);
+  const b5 = computeRollingReturns(bSeries, 5.0);
+  const b7 = computeRollingReturns(bSeries, 7.0);
+
+  return {
+    r1,
+    r3,
+    r5,
+    r7,
+    hit1: benchmarkStatus.available ? computeBenchmarkHitRate(r1.series, b1.series) : null,
+    hit3: benchmarkStatus.available ? computeBenchmarkHitRate(r3.series, b3.series) : null,
+    hit5: benchmarkStatus.available ? computeBenchmarkHitRate(r5.series, b5.series) : null,
+    hit7: benchmarkStatus.available ? computeBenchmarkHitRate(r7.series, b7.series) : null,
+  };
+};
+
+export function buildComparisonCsv(input: ExportBuilderInput): string {
+  const {
+    selectedFunds,
+    riskMetrics,
+    trailingMetaMap,
+    seriesMap,
+    validationMap,
+    benchmarkStatus,
+    rfRate,
+    exportTimestamp = new Date().toISOString(),
+  } = input;
+
+  const provenance = [
+    `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio (Batch 1 Safe Export)`,
+    `# NAV Feed Provider: mfapi.in (third-party historical NAV mirror; strictly validated)`,
+    `# Identity Registry Benchmark: AMFI India NAVAll Snapshot (${AMFI_SNAPSHOT_DATE})`,
+    `# Selected Benchmark: ${benchmarkStatus.name} (${benchmarkStatus.symbol}) | Variant: ${benchmarkStatus.variant} | Status: ${benchmarkStatus.available ? `Verified (${benchmarkStatus.source}, as of ${benchmarkStatus.asOfDate})` : `Unavailable (${benchmarkStatus.reason})`}`,
+    `# Risk-Free Rate Applied: ${rfRate.toFixed(2)}% Annualized`,
+    `# Export Timestamp: ${exportTimestamp}`,
+    `#`,
+  ];
+
+  const headers = [
+    'Scheme Code',
+    'Scheme Name',
+    'Identity Status',
+    'Identity Reason',
+    'NAV Validation Status',
+    'Corporate Action Quarantine',
+    'Validated Window Start',
+    'Validated Window End',
+    'NAV Observations',
+    'ISIN',
+    'Plan',
+    'Option',
+    'Category',
+    'Asset Class',
+    'Fund House',
+    'Target Benchmark',
+    'Benchmark Source Status',
+    'Rf Applied (%)',
+    'AUM (Cr INR)',
+    'Direct TER (%)',
+    'Turnover (%)',
+    'Riskometer',
+    'Inception Date',
+    'Manager Name',
+    'Manager Tenure (Yrs)',
+    '3M Return (%)',
+    '6M Return (%)',
+    '1Y CAGR (%)',
+    '3Y CAGR (%)',
+    '5Y CAGR (%)',
+    '7Y CAGR (%)',
+    '10Y CAGR (%)',
+    'Annualized Volatility (%)',
+    'Sharpe Ratio',
+    'Sortino Ratio',
+    'Beta (vs Benchmark)',
+    "Jensen's Alpha (%)",
+    'R-Squared',
+    'Tracking Error (%)',
+    'Information Ratio',
+    'Max Drawdown (%)',
+    'Recovery Days',
+    'Calmar Ratio',
+    'Upside Capture (%)',
+    'Downside Capture (%)',
+    '1Y Rolling Mean (%)',
+    '1Y Rolling Median (%)',
+    '1Y Rolling Min (%)',
+    '1Y Rolling Max (%)',
+    '1Y Rolling 25th %ile (%)',
+    '1Y Rolling 75th %ile (%)',
+    '1Y Rolling Std Dev',
+    '1Y Rolling % Positive Windows',
+    '1Y Benchmark Hit Rate (%)',
+    '3Y Rolling Mean (%)',
+    '3Y Rolling Median (%)',
+    '3Y Rolling Min (%)',
+    '3Y Rolling Max (%)',
+    '3Y Rolling 25th %ile (%)',
+    '3Y Rolling 75th %ile (%)',
+    '3Y Rolling Std Dev',
+    '3Y Rolling % Positive Windows',
+    '3Y Benchmark Hit Rate (%)',
+    '5Y Rolling Mean (%)',
+    '5Y Rolling Median (%)',
+    '5Y Rolling Min (%)',
+    '5Y Rolling Max (%)',
+    '5Y Rolling 25th %ile (%)',
+    '5Y Rolling 75th %ile (%)',
+    '5Y Rolling Std Dev',
+    '5Y Rolling % Positive Windows',
+    '5Y Benchmark Hit Rate (%)',
+    '7Y Rolling Mean (%)',
+    '7Y Rolling Median (%)',
+    '7Y Rolling Min (%)',
+    '7Y Rolling Max (%)',
+    '7Y Rolling 25th %ile (%)',
+    '7Y Rolling 75th %ile (%)',
+    '7Y Rolling Std Dev',
+    '7Y Rolling % Positive Windows',
+    '7Y Benchmark Hit Rate (%)',
+  ];
+
+  const rows = selectedFunds.map((fund) => {
+    const rm = riskMetrics.find((r) => r.schemeCode === fund.scheme_code);
+    const valReport = validationMap[fund.scheme_code];
+    const cagr = trailingMetaMap[fund.scheme_code]?.values || {};
+    const series = seriesMap[fund.scheme_code] || [];
+    const { r1, r3, r5, r7, hit1, hit3, hit5, hit7 } = getRollingAnalyticsForFund(
+      series,
+      valReport,
+      benchmarkStatus
+    );
+
+    const rollCells = (dist: typeof r1, hit: number | null) =>
+      dist.available && dist.count > 0
+        ? [
+            csvNum(dist.mean),
+            csvNum(dist.median),
+            csvNum(dist.min),
+            csvNum(dist.max),
+            csvNum(dist.q25),
+            csvNum(dist.q75),
+            csvNum(dist.std),
+            csvNum(dist.pctPositive),
+            csvNum(hit),
+          ]
+        : [
+            '"Unavailable"',
+            '"Unavailable"',
+            '"Unavailable"',
+            '"Unavailable"',
+            '"Unavailable"',
+            '"Unavailable"',
+            '"Unavailable"',
+            '"Unavailable"',
+            '"Unavailable"',
+          ];
+
+    return [
+      fund.scheme_code,
+      csvText(fund.name),
+      csvText(fund.identityStatus.status),
+      csvText(fund.identityStatus.reason || 'Verified'),
+      csvText(valReport?.status || 'unavailable'),
+      csvText(
+        valReport?.quarantinedFromBreak
+          ? valReport.corporateActionBreaks.map((b) => `${b.date} (${b.pctChange}%)`).join('; ')
+          : 'None'
+      ),
+      csvText(valReport?.earliestDate ?? null),
+      csvText(valReport?.latestDate ?? null),
+      valReport?.validCount ?? 0,
+      csvText(fund.isin),
+      csvText(fund.plan),
+      csvText(fund.option),
+      csvText(fund.category),
+      csvText(fund.asset_class),
+      csvText(fund.fund_house),
+      csvText(benchmarkStatus.name),
+      csvText(benchmarkStatus.available ? `Verified (${benchmarkStatus.variant})` : 'Unavailable'),
+      rfRate.toFixed(2),
+      csvNum(fund.aum_cr),
+      csvNum(fund.expense_ratio_direct),
+      csvNum(fund.turnover_ratio_pct),
+      csvText(fund.riskometer),
+      csvText(fund.inception_date),
+      csvText(fund.manager?.name ?? null),
+      csvNum(fund.manager?.tenureYears ?? null),
+      csvNum(cagr['3M']),
+      csvNum(cagr['6M']),
+      csvNum(cagr['1Y']),
+      csvNum(cagr['3Y']),
+      csvNum(cagr['5Y']),
+      csvNum(cagr['7Y']),
+      csvNum(cagr['10Y']),
+      csvNum(rm?.volatility),
+      csvNum(rm?.sharpe),
+      csvNum(rm?.sortino),
+      csvNum(rm?.beta),
+      csvNum(rm?.jensensAlpha),
+      csvNum(rm?.rSquared),
+      csvNum(rm?.trackingError),
+      csvNum(rm?.informationRatio),
+      csvNum(rm?.maxDrawdown),
+      csvNum(rm?.recoveryDays),
+      csvNum(rm?.calmarRatio),
+      csvNum(rm?.upsideCapture),
+      csvNum(rm?.downsideCapture),
+      ...rollCells(r1, hit1),
+      ...rollCells(r3, hit3),
+      ...rollCells(r5, hit5),
+      ...rollCells(r7, hit7),
+    ].join(',');
+  });
+
+  return [...provenance, headers.join(','), ...rows].join('\n');
+}
+
+export function buildComparisonJsonPayload(input: ExportBuilderInput) {
+  const {
+    selectedFunds,
+    riskMetrics,
+    trailingMetaMap,
+    seriesMap,
+    validationMap,
+    benchmarkStatus,
+    rfRate,
+    exportTimestamp = new Date().toISOString(),
+  } = input;
+
+  return {
+    metadata: {
+      system: 'Indian Mutual Funds Quantitative & Risk Analytics Studio',
+      exportTimestamp,
+      navDataSource: 'api.mfapi.in (third-party AMFI NAV mirror; strictly validated)',
+      identityRegistry: `AMFI India NAVAll Snapshot (${AMFI_SNAPSHOT_DATE})`,
+      riskFreeRateAppliedPct: rfRate,
+      benchmark: {
+        symbol: benchmarkStatus.symbol,
+        name: benchmarkStatus.name,
+        variant: benchmarkStatus.variant,
+        available: benchmarkStatus.available,
+        source: benchmarkStatus.source,
+        asOfDate: benchmarkStatus.asOfDate,
+        reason: benchmarkStatus.reason,
+      },
+    },
+    funds: selectedFunds.map((fund) => {
+      const rm = riskMetrics.find((r) => r.schemeCode === fund.scheme_code) || null;
+      const valReport = validationMap[fund.scheme_code] || null;
+      const cagrMeta = trailingMetaMap[fund.scheme_code] || { values: {}, unavailableReasons: {} };
+      const series = seriesMap[fund.scheme_code] || [];
+      const { r1, r3, r5, r7, hit1, hit3, hit5, hit7 } = getRollingAnalyticsForFund(
+        series,
+        valReport ?? undefined,
+        benchmarkStatus
+      );
+
+      return {
+        meta: fund,
+        navValidation: valReport,
+        trailingReturns: cagrMeta.values,
+        trailingUnavailableReasons: cagrMeta.unavailableReasons,
+        riskMetrics: rm,
+        rollingDistributions: {
+          '1Year': { ...r1, hitRatePct: hit1 },
+          '3Year': { ...r3, hitRatePct: hit3 },
+          '5Year': { ...r5, hitRatePct: hit5 },
+          '7Year': { ...r7, hitRatePct: hit7 },
+        },
+        holdings: fund.holdings,
+      };
+    }),
+  };
+}
+
+export function buildSingleFundFactsheetCsv(
+  fund: FundMeta,
+  input: ExportBuilderInput
+): string {
+  const {
+    riskMetrics,
+    trailingMetaMap,
+    seriesMap,
+    validationMap,
+    benchmarkStatus,
+    rfRate,
+    exportTimestamp = new Date().toISOString(),
+  } = input;
+
+  const rm = riskMetrics.find((r) => r.schemeCode === fund.scheme_code);
+  const valReport = validationMap[fund.scheme_code];
+  const cagrMeta = trailingMetaMap[fund.scheme_code] || { values: {}, unavailableReasons: {} };
+  const cagr = cagrMeta.values;
+  const series = seriesMap[fund.scheme_code] || [];
+  const { r1, r3, r5, r7, hit1, hit3, hit5, hit7 } = getRollingAnalyticsForFund(
+    series,
+    valReport,
+    benchmarkStatus
+  );
+
+  const fmtRollRow = (label: string, r: typeof r1, hit: number | null) =>
+    [
+      csvText(label),
+      r.available && r.count > 0 ? csvNum(r.mean) : '"Unavailable"',
+      r.available && r.count > 0 ? csvNum(r.median) : '"Unavailable"',
+      r.available && r.count > 0 ? csvNum(r.min) : '"Unavailable"',
+      r.available && r.count > 0 ? csvNum(r.max) : '"Unavailable"',
+      r.available && r.count > 0 ? csvNum(r.q25) : '"Unavailable"',
+      r.available && r.count > 0 ? csvNum(r.q75) : '"Unavailable"',
+      r.available && r.count > 0 ? csvNum(r.std) : '"Unavailable"',
+      r.available && r.count > 0 ? csvNum(r.pctPositive, '%') : '"Unavailable"',
+      csvNum(hit, '%'),
+      csvText(r.unavailableReason || (hit === null ? benchmarkStatus.reason || 'Unavailable' : 'OK')),
+    ].join(',');
+
+  const lines: string[] = [
+    `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio`,
+    `# NAV Feed Source: api.mfapi.in/mf/${fund.scheme_code} (Status: ${valReport?.status || 'unavailable'})`,
+    `# AMFI Identity Reconciliation: ${fund.identityStatus.status} (${AMFI_SNAPSHOT_DATE})`,
+    `# Benchmark Status: ${benchmarkStatus.name} | Variant: ${benchmarkStatus.variant} | Available: ${benchmarkStatus.available}`,
+    `# Risk-Free Rate Applied: ${rfRate.toFixed(2)}%`,
+    `# Disclosure Source: ${fund.disclosureSource || 'Unavailable'}`,
+    `# Export Timestamp: ${exportTimestamp}`,
+    `#`,
+    `"FUND FACTSHEET & QUANTITATIVE DOSSIER"`,
+    `"Scheme Name",${csvText(fund.name)}`,
+    `"Scheme Code",${fund.scheme_code}`,
+    `"ISIN",${csvText(fund.isin)}`,
+    `"Plan / Option",${csvText(`${fund.plan} / ${fund.option}`)}`,
+    `"Identity Status",${csvText(fund.identityStatus.status)}`,
+    `"Identity Audit Reason",${csvText(fund.identityStatus.reason)}`,
+    `"NAV Validation Status",${csvText(valReport?.status || 'unavailable')}`,
+    `"NAV Validation Window",${csvText(valReport?.earliestDate && valReport?.latestDate ? `${valReport.earliestDate} to ${valReport.latestDate}` : null)}`,
+    `"Category",${csvText(fund.category)}`,
+    `"Asset Class",${csvText(fund.asset_class)}`,
+    `"Fund House",${csvText(fund.fund_house)}`,
+    `"Selected Benchmark",${csvText(`${benchmarkStatus.name} (${benchmarkStatus.variant})`)}`,
+    `"Inception Date",${csvText(fund.inception_date)}`,
+    `"AUM (Cr INR)",${csvNum(fund.aum_cr)}`,
+    `"Direct TER (%)",${csvNum(fund.expense_ratio_direct)}`,
+    `"Turnover Ratio (%)",${csvNum(fund.turnover_ratio_pct)}`,
+    `"Riskometer",${csvText(fund.riskometer)}`,
+    `"Lead Manager",${csvText(fund.manager?.name ?? null)}`,
+    `"Manager Tenure (Years)",${csvNum(fund.manager?.tenureYears ?? null)}`,
+    ``,
+    `"TRAILING RETURNS","Value (%)","Status / Reason"`,
+    `"3 Months (Absolute)",${csvNum(cagr['3M'])},${csvText(cagrMeta.unavailableReasons['3M'] || 'OK')}`,
+    `"6 Months (Absolute)",${csvNum(cagr['6M'])},${csvText(cagrMeta.unavailableReasons['6M'] || 'OK')}`,
+    `"1 Year (CAGR)",${csvNum(cagr['1Y'])},${csvText(cagrMeta.unavailableReasons['1Y'] || 'OK')}`,
+    `"3 Years (CAGR)",${csvNum(cagr['3Y'])},${csvText(cagrMeta.unavailableReasons['3Y'] || 'OK')}`,
+    `"5 Years (CAGR)",${csvNum(cagr['5Y'])},${csvText(cagrMeta.unavailableReasons['5Y'] || 'OK')}`,
+    `"7 Years (CAGR)",${csvNum(cagr['7Y'])},${csvText(cagrMeta.unavailableReasons['7Y'] || 'OK')}`,
+    `"10 Years (CAGR)",${csvNum(cagr['10Y'])},${csvText(cagrMeta.unavailableReasons['10Y'] || 'OK')}`,
+    ``,
+    `"ROLLING RETURN DISTRIBUTIONS & HIT RATES"`,
+    `"Window","Mean (%)","Median (%)","Min (%)","Max (%)","25th %ile","75th %ile","Std Dev","% Positive Windows","Benchmark Hit Rate (%)","Status / Reason"`,
+    fmtRollRow('1-Year Rolling', r1, hit1),
+    fmtRollRow('3-Year Rolling', r3, hit3),
+    fmtRollRow('5-Year Rolling', r5, hit5),
+    fmtRollRow('7-Year Rolling', r7, hit7),
+    ``,
+    `"RISK RATIOS & ACTIVE METRICS (Rf=${rfRate.toFixed(2)}%)"`,
+    `"Metric","Value","Note"`,
+    `"Annualized Volatility (%)",${csvNum(rm?.volatility)},${csvText(rm?.unavailableReasons?.fundOnly || rm?.unavailableReasons?.corporateAction || 'OK')}`,
+    `"Sharpe Ratio",${csvNum(rm?.sharpe)},${csvText(rm?.unavailableReasons?.sharpe || 'OK')}`,
+    `"Sortino Ratio",${csvNum(rm?.sortino)},${csvText(rm?.unavailableReasons?.sortino || 'OK')}`,
+    `"Beta",${csvNum(rm?.beta)},${csvText(rm?.unavailableReasons?.beta || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Jensen's Alpha (%)",${csvNum(rm?.jensensAlpha)},${csvText(rm?.unavailableReasons?.jensensAlpha || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"R-Squared",${csvNum(rm?.rSquared)},${csvText(rm?.unavailableReasons?.rSquared || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Tracking Error (%)",${csvNum(rm?.trackingError)},${csvText(rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Information Ratio",${csvNum(rm?.informationRatio)},${csvText(rm?.unavailableReasons?.informationRatio || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Maximum Drawdown (%)",${csvNum(rm?.maxDrawdown)},${csvText(rm?.unavailableReasons?.fundOnly || rm?.unavailableReasons?.corporateAction || 'OK')}`,
+    `"Recovery Period (Days)",${csvNum(rm?.recoveryDays)},${csvText(rm?.recoveryDays == null ? (rm?.unavailableReasons?.fundOnly || rm?.unavailableReasons?.corporateAction || 'Unavailable') : 'OK')}`,
+    `"Calmar Ratio",${csvNum(rm?.calmarRatio)},${csvText(rm?.unavailableReasons?.calmarRatio || 'OK')}`,
+    `"Upside Capture (%)",${csvNum(rm?.upsideCapture)},${csvText(rm?.unavailableReasons?.upsideCapture || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Downside Capture (%)",${csvNum(rm?.downsideCapture)},${csvText(rm?.unavailableReasons?.downsideCapture || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    ``,
+    `"PORTFOLIO HOLDINGS & LIQUIDITY"`,
+    `"ISIN","Security Name","Sector","Market Cap","Weight (%)","30D ADTV (Cr INR)"`,
+    ...(fund.holdings && fund.holdings.length > 0
+      ? fund.holdings.map((h) =>
+          [
+            csvText(h.isin),
+            csvText(h.name),
+            csvText(h.sector),
+            csvText(h.mcap),
+            h.weight,
+            csvNum(h.adtv_cr),
+          ].join(',')
+        )
+      : [
+          [
+            '"Unavailable"',
+            csvText(fund.holdingsStatus.reason || 'Unavailable'),
+            '"Unavailable"',
+            '"Unavailable"',
+            '"Unavailable"',
+            '"Unavailable"',
+          ].join(','),
+        ]),
+  ];
+
+  return lines.join('\n');
+}
+
+export function buildRawNavCsv(input: ExportBuilderInput): string {
+  const {
+    selectedFunds,
+    seriesMap,
+    benchmarkStatus,
+    exportTimestamp = new Date().toISOString(),
+  } = input;
+
+  const allDatesSet = new Set<string>();
+  const benchSeries = benchmarkStatus.available ? benchmarkStatus.series : [];
+  benchSeries.forEach((p) => allDatesSet.add(p.date));
+  selectedFunds.forEach((f) => {
+    const s = seriesMap[f.scheme_code] || [];
+    s.forEach((p) => allDatesSet.add(p.date));
+  });
+
+  const dates = Array.from(allDatesSet).sort();
+  const benchMap = new Map(benchSeries.map((p) => [p.date, p.nav]));
+  const fundMaps = selectedFunds.map((f) => ({
+    map: new Map((seriesMap[f.scheme_code] || []).map((p) => [p.date, p.nav])),
+  }));
+
+  const provenance = [
+    `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio`,
+    `# NAV Time-Series Source: api.mfapi.in (verified scheme identities & validated NAV observations)`,
+    `# Benchmark: ${benchmarkStatus.name} (${benchmarkStatus.symbol}) | Variant: ${benchmarkStatus.variant} | Status: ${benchmarkStatus.available ? `Verified (${benchmarkStatus.source})` : `Unavailable (${benchmarkStatus.reason})`}`,
+    `# Export Timestamp: ${exportTimestamp}`,
+    `# Total Validated Trading Dates: ${dates.length}`,
+    `#`,
+  ];
+
+  const benchHeader = benchmarkStatus.available
+    ? `Benchmark_${sanitizeFilenamePart(benchmarkStatus.name)}_${benchmarkStatus.variant}`
+    : `Benchmark_${sanitizeFilenamePart(benchmarkStatus.name)}_Unavailable`;
+
+  const headers = ['Date', benchHeader, ...selectedFunds.map((f) => csvText(`${f.name} (${f.scheme_code})`))];
+  const rows = dates.map((d) => {
+    const bNav = benchmarkStatus.available ? (benchMap.get(d) ?? '') : 'Unavailable';
+    const fundNavs = fundMaps.map((fm) => {
+      const nav = fm.map.get(d);
+      return nav !== undefined ? nav : '';
+    });
+    return [d, bNav, ...fundNavs].join(',');
+  });
+
+  return [...provenance, headers.join(','), ...rows].join('\n');
+}
 
 interface DataExportModalProps {
   isOpen: boolean;
   onClose: () => void;
   selectedFunds: FundMeta[];
   riskMetrics: RiskMetrics[];
-  trailingCagrMap: Record<number, Record<string, number | undefined>>;
+  trailingMetaMap: Record<number, TrailingCagrResult>;
   seriesMap: Record<number, NavPoint[]>;
-  benchmarkSeries: NavPoint[];
-  benchmarkName: string;
+  validationMap: Record<number, NavValidationReport | undefined>;
+  benchmarkStatus: BenchmarkStatus;
+  rfRate: number;
 }
 
 export const DataExportModal: React.FC<DataExportModalProps> = ({
@@ -19,10 +524,11 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
   onClose,
   selectedFunds,
   riskMetrics,
-  trailingCagrMap,
+  trailingMetaMap,
   seriesMap,
-  benchmarkSeries,
-  benchmarkName,
+  validationMap,
+  benchmarkStatus,
+  rfRate,
 }) => {
   const [downloadSuccess, setDownloadSuccess] = useState<string | null>(null);
   const [individualFundCode, setIndividualFundCode] = useState<number>(
@@ -31,48 +537,27 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Sanitizer: converts fund names to clean, filesystem-safe strings
-  const sanitizeName = (name: string): string => {
-    return name
-      .replace(/[^a-zA-Z0-9\s]/g, '')
-      .trim()
-      .replace(/\s+/g, '_');
-  };
-
-  // Format current datetime: YYYYMMDD_HHmmss
   const getFormattedDateTime = (): string => {
     const now = new Date();
     const pad = (n: number) => n.toString().padStart(2, '0');
-    const yyyy = now.getFullYear();
-    const MM = pad(now.getMonth() + 1);
-    const dd = pad(now.getDate());
-    const hh = pad(now.getHours());
-    const mm = pad(now.getMinutes());
-    const ss = pad(now.getSeconds());
-    return `${yyyy}${MM}${dd}_${hh}${mm}${ss}`;
+    return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
   };
 
-  // Generate institutional, descriptive filename based on fund names and timestamp
   const getExportFilename = (prefix: string, extension: string, singleFundName?: string): string => {
     const timestamp = getFormattedDateTime();
-
     if (singleFundName) {
-      return `${sanitizeName(singleFundName)}_${timestamp}_${prefix}.${extension}`;
+      return `${sanitizeFilenamePart(singleFundName)}_${timestamp}_${prefix}.${extension}`;
     }
-
     if (selectedFunds.length === 1) {
-      return `${sanitizeName(selectedFunds[0].name)}_${timestamp}_${prefix}.${extension}`;
+      return `${sanitizeFilenamePart(selectedFunds[0].name)}_${timestamp}_${prefix}.${extension}`;
     }
-
     if (selectedFunds.length === 2) {
-      return `Comparison_${sanitizeName(selectedFunds[0].name)}_vs_${sanitizeName(selectedFunds[1].name)}_${timestamp}_${prefix}.${extension}`;
+      return `Comparison_${sanitizeFilenamePart(selectedFunds[0].name)}_vs_${sanitizeFilenamePart(selectedFunds[1].name)}_${timestamp}_${prefix}.${extension}`;
     }
-
     if (selectedFunds.length === 3) {
-      return `Comparison_${sanitizeName(selectedFunds[0].name)}_${sanitizeName(selectedFunds[1].name)}_${sanitizeName(selectedFunds[2].name)}_${timestamp}_${prefix}.${extension}`;
+      return `Comparison_${sanitizeFilenamePart(selectedFunds[0].name)}_${sanitizeFilenamePart(selectedFunds[1].name)}_${sanitizeFilenamePart(selectedFunds[2].name)}_${timestamp}_${prefix}.${extension}`;
     }
-
-    const leadName = sanitizeName(selectedFunds[0].name);
+    const leadName = sanitizeFilenamePart(selectedFunds[0]?.name || 'Portfolio');
     return `Portfolio_${selectedFunds.length}_Funds_${leadName}_${timestamp}_${prefix}.${extension}`;
   };
 
@@ -91,361 +576,48 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
     setTimeout(() => setDownloadSuccess(null), 3500);
   };
 
-  // Compute 1Y, 3Y, 5Y, 7Y rolling distributions & hit rates for each fund
-  const getRollingAnalyticsForFund = (schemeCode: number) => {
-    const series = seriesMap[schemeCode] || [];
-    const r1 = computeRollingReturns(series, 1.0);
-    const r3 = computeRollingReturns(series, 3.0);
-    const r5 = computeRollingReturns(series, 5.0);
-    const r7 = computeRollingReturns(series, 7.0);
-
-    const b1 = computeRollingReturns(benchmarkSeries, 1.0);
-    const b3 = computeRollingReturns(benchmarkSeries, 3.0);
-    const b5 = computeRollingReturns(benchmarkSeries, 5.0);
-    const b7 = computeRollingReturns(benchmarkSeries, 7.0);
-
-    const hit1 = computeBenchmarkHitRate(r1.series, b1.series);
-    const hit3 = computeBenchmarkHitRate(r3.series, b3.series);
-    const hit5 = computeBenchmarkHitRate(r5.series, b5.series);
-    const hit7 = computeBenchmarkHitRate(r7.series, b7.series);
-
-    return {
-      r1, r3, r5, r7,
-      hit1, hit3, hit5, hit7,
-    };
+  const builderInput: ExportBuilderInput = {
+    selectedFunds,
+    riskMetrics,
+    trailingMetaMap,
+    seriesMap,
+    validationMap,
+    benchmarkStatus,
+    rfRate,
   };
 
-  // 1. Export Full Comparison Summary CSV with COMPLETE metrics and provenance
   const handleExportComparisonCsv = () => {
-    const metadataProvenanceLines = [
-      `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio`,
-      `# Fund NAV Source: AMFI India Official API (https://api.mfapi.in)`,
-      `# Benchmark Source: NSE Total Returns Index (TRI) synchronized on Official Indian Exchange Trading Calendar`,
-      `# Risk-Free Rate: 6.50% Annualized (Indian 10-Year Sovereign G-Sec Benchmark Yield)`,
-      `# Methodology: 252 Business Trading Days Inner-Join Regression (Zero Weekend Days, Zero Forward-Filling)`,
-      `# Holdings As-Of Date: September 2026 Official AMC Statutory Portfolio Disclosures`,
-      `# Export Timestamp: ${new Date().toISOString()}`,
-      `#`,
-    ];
-
-    const headers = [
-      'Scheme Code',
-      'Scheme Name',
-      'Category',
-      'Asset Class',
-      'Fund House',
-      'Benchmark',
-      'AUM (Cr INR)',
-      'Direct TER (%)',
-      'Turnover (%)',
-      'Riskometer',
-      'Inception Date',
-      'Manager Name',
-      'Manager Tenure (Yrs)',
-      // Trailing Returns
-      '3M Return (%)',
-      '6M Return (%)',
-      '1Y CAGR (%)',
-      '3Y CAGR (%)',
-      '5Y CAGR (%)',
-      '7Y CAGR (%)',
-      '10Y CAGR (%)',
-      // Risk & Active Alpha
-      'Annualized Volatility (%)',
-      'Sharpe Ratio',
-      'Sortino Ratio',
-      'Beta (vs Benchmark)',
-      "Jensen's Alpha (%)",
-      'R-Squared',
-      'Tracking Error (%)',
-      'Information Ratio',
-      'Max Drawdown (%)',
-      'Recovery Days',
-      'Calmar Ratio',
-      'Upside Capture (%)',
-      'Downside Capture (%)',
-      // 1Y Rolling Distribution & Hit Rate
-      '1Y Rolling Mean (%)',
-      '1Y Rolling Median (%)',
-      '1Y Rolling Min (%)',
-      '1Y Rolling Max (%)',
-      '1Y Rolling 25th %ile (%)',
-      '1Y Rolling 75th %ile (%)',
-      '1Y Rolling Std Dev',
-      '1Y Rolling % Positive Windows',
-      '1Y Benchmark Hit Rate (%)',
-      // 3Y Rolling Distribution & Hit Rate
-      '3Y Rolling Mean (%)',
-      '3Y Rolling Median (%)',
-      '3Y Rolling Min (%)',
-      '3Y Rolling Max (%)',
-      '3Y Rolling 25th %ile (%)',
-      '3Y Rolling 75th %ile (%)',
-      '3Y Rolling Std Dev',
-      '3Y Rolling % Positive Windows',
-      '3Y Benchmark Hit Rate (%)',
-      // 5Y Rolling Distribution & Hit Rate
-      '5Y Rolling Mean (%)',
-      '5Y Rolling Median (%)',
-      '5Y Rolling Min (%)',
-      '5Y Rolling Max (%)',
-      '5Y Rolling 25th %ile (%)',
-      '5Y Rolling 75th %ile (%)',
-      '5Y Rolling Std Dev',
-      '5Y Rolling % Positive Windows',
-      '5Y Benchmark Hit Rate (%)',
-      // 7Y Rolling Distribution & Hit Rate
-      '7Y Rolling Mean (%)',
-      '7Y Rolling Median (%)',
-      '7Y Rolling Min (%)',
-      '7Y Rolling Max (%)',
-      '7Y Rolling 25th %ile (%)',
-      '7Y Rolling 75th %ile (%)',
-      '7Y Rolling Std Dev',
-      '7Y Rolling % Positive Windows',
-      '7Y Benchmark Hit Rate (%)',
-    ];
-
-    const rows = selectedFunds.map((fund) => {
-      const rm = riskMetrics.find((r) => r.schemeCode === fund.scheme_code);
-      const cagr = trailingCagrMap[fund.scheme_code] || {};
-      const { r1, r3, r5, r7, hit1, hit3, hit5, hit7 } = getRollingAnalyticsForFund(fund.scheme_code);
-
-      return [
-        fund.scheme_code,
-        `"${fund.name}"`,
-        `"${fund.category}"`,
-        fund.asset_class,
-        `"${fund.fund_house}"`,
-        `"${fund.benchmark_symbol}"`,
-        fund.aum_cr,
-        fund.expense_ratio_direct,
-        fund.turnover_ratio_pct,
-        fund.riskometer,
-        fund.inception_date,
-        `"${fund.manager.name}"`,
-        fund.manager.tenureYears,
-        // Trailing Returns
-        cagr['3M'] ?? 'N/A',
-        cagr['6M'] ?? 'N/A',
-        cagr['1Y'] ?? 'N/A',
-        cagr['3Y'] ?? 'N/A',
-        cagr['5Y'] ?? 'N/A',
-        cagr['7Y'] ?? 'N/A',
-        cagr['10Y'] ?? 'N/A',
-        // Risk & Alpha
-        rm?.volatility ?? 'N/A',
-        rm?.sharpe ?? 'N/A',
-        rm?.sortino ?? 'N/A',
-        rm?.beta ?? 'N/A',
-        rm?.jensensAlpha ?? 'N/A',
-        rm?.rSquared ?? 'N/A',
-        rm?.trackingError ?? 'N/A',
-        rm?.informationRatio ?? 'N/A',
-        rm?.maxDrawdown ?? 'N/A',
-        rm?.recoveryDays ?? 'N/A',
-        rm?.calmarRatio ?? 'N/A',
-        rm?.upsideCapture ?? 'N/A',
-        rm?.downsideCapture ?? 'N/A',
-        // 1Y Rolling
-        r1.count > 0 ? r1.mean : 'N/A',
-        r1.count > 0 ? r1.median : 'N/A',
-        r1.count > 0 ? r1.min : 'N/A',
-        r1.count > 0 ? r1.max : 'N/A',
-        r1.count > 0 ? r1.q25 : 'N/A',
-        r1.count > 0 ? r1.q75 : 'N/A',
-        r1.count > 0 ? r1.std : 'N/A',
-        r1.count > 0 ? r1.pctPositive : 'N/A',
-        hit1 !== undefined ? hit1 : 'N/A',
-        // 3Y Rolling
-        r3.count > 0 ? r3.mean : 'N/A',
-        r3.count > 0 ? r3.median : 'N/A',
-        r3.count > 0 ? r3.min : 'N/A',
-        r3.count > 0 ? r3.max : 'N/A',
-        r3.count > 0 ? r3.q25 : 'N/A',
-        r3.count > 0 ? r3.q75 : 'N/A',
-        r3.count > 0 ? r3.std : 'N/A',
-        r3.count > 0 ? r3.pctPositive : 'N/A',
-        hit3 !== undefined ? hit3 : 'N/A',
-        // 5Y Rolling
-        r5.count > 0 ? r5.mean : 'N/A',
-        r5.count > 0 ? r5.median : 'N/A',
-        r5.count > 0 ? r5.min : 'N/A',
-        r5.count > 0 ? r5.max : 'N/A',
-        r5.count > 0 ? r5.q25 : 'N/A',
-        r5.count > 0 ? r5.q75 : 'N/A',
-        r5.count > 0 ? r5.std : 'N/A',
-        r5.count > 0 ? r5.pctPositive : 'N/A',
-        hit5 !== undefined ? hit5 : 'N/A',
-        // 7Y Rolling
-        r7.count > 0 ? r7.mean : 'N/A',
-        r7.count > 0 ? r7.median : 'N/A',
-        r7.count > 0 ? r7.min : 'N/A',
-        r7.count > 0 ? r7.max : 'N/A',
-        r7.count > 0 ? r7.q25 : 'N/A',
-        r7.count > 0 ? r7.q75 : 'N/A',
-        r7.count > 0 ? r7.std : 'N/A',
-        r7.count > 0 ? r7.pctPositive : 'N/A',
-        hit7 !== undefined ? hit7 : 'N/A',
-      ].join(',');
-    });
-
-    const csvContent = [...metadataProvenanceLines, headers.join(','), ...rows].join('\n');
-    const filename = getExportFilename('Comparison_Report', 'csv');
-    triggerDownload(filename, csvContent, 'text/csv');
+    triggerDownload(
+      getExportFilename('Comparison_Report', 'csv'),
+      buildComparisonCsv(builderInput),
+      'text/csv'
+    );
   };
 
-  // 2. Export Structured JSON with COMPLETE nested metrics and provenance
   const handleExportComparisonJson = () => {
-    const payload = {
-      metadata: {
-        system: 'Indian Mutual Funds Quantitative & Risk Analytics Studio',
-        exportTimestamp: new Date().toISOString(),
-        navDataSource: 'AMFI India Official API (https://api.mfapi.in)',
-        benchmarkDataSource: 'NSE Total Returns Index (TRI) on Business Trading Calendar',
-        riskFreeRate: '6.50% G-Sec Benchmark Yield',
-        benchmarkName,
-      },
-      funds: selectedFunds.map((fund) => {
-        const rm = riskMetrics.find((r) => r.schemeCode === fund.scheme_code);
-        const cagr = trailingCagrMap[fund.scheme_code] || {};
-        const { r1, r3, r5, r7, hit1, hit3, hit5, hit7 } = getRollingAnalyticsForFund(fund.scheme_code);
-
-        return {
-          meta: fund,
-          trailingReturns: cagr,
-          riskMetrics: rm,
-          rollingDistributions: {
-            '1Year': { ...r1, hitRatePct: hit1 },
-            '3Year': { ...r3, hitRatePct: hit3 },
-            '5Year': { ...r5, hitRatePct: hit5 },
-            ...(r7.count > 0 ? { '7Year': { ...r7, hitRatePct: hit7 } } : {}),
-          },
-          holdings: fund.holdings,
-        };
-      }),
-    };
-    const jsonContent = JSON.stringify(payload, null, 2);
-    const filename = getExportFilename('Analytics_Package', 'json');
-    triggerDownload(filename, jsonContent, 'application/json');
+    triggerDownload(
+      getExportFilename('Analytics_Package', 'json'),
+      JSON.stringify(buildComparisonJsonPayload(builderInput), null, 2),
+      'application/json'
+    );
   };
 
-  // 3. Export Single Fund Detailed Factsheet & Portfolio CSV
   const handleExportSingleFundCsv = () => {
     const fund = selectedFunds.find((f) => f.scheme_code === individualFundCode) || selectedFunds[0];
     if (!fund) return;
-
-    const rm = riskMetrics.find((r) => r.schemeCode === fund.scheme_code);
-    const cagr = trailingCagrMap[fund.scheme_code] || {};
-    const { r1, r3, r5, r7, hit1, hit3, hit5, hit7 } = getRollingAnalyticsForFund(fund.scheme_code);
-
-    const lines: string[] = [
-      `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio`,
-      `# NAV Source: AMFI India Official API (api.mfapi.in/mf/${fund.scheme_code})`,
-      `# Holdings As-Of: ${fund.asOfDate || 'September 2026 AMC Factsheet'}`,
-      `# Statutory Disclosure: ${fund.isStatutoryDisclosure ? 'Verified Official Disclosure' : 'Category-Aligned Representative Model'}`,
-      `# Export Timestamp: ${new Date().toISOString()}`,
-      `#`,
-      `"FUND FACTSHEET & QUANTITATIVE DOSSIER"`,
-      `"Scheme Name","${fund.name}"`,
-      `"Scheme Code","${fund.scheme_code}"`,
-      `"Category","${fund.category}"`,
-      `"Asset Class","${fund.asset_class}"`,
-      `"Fund House","${fund.fund_house}"`,
-      `"Benchmark","${fund.benchmark_symbol}"`,
-      `"Inception Date","${fund.inception_date}"`,
-      `"AUM (Cr INR)","${fund.aum_cr}"`,
-      `"Direct TER (%)","${fund.expense_ratio_direct}"`,
-      `"Turnover Ratio (%)","${fund.turnover_ratio_pct}"`,
-      `"Riskometer","${fund.riskometer}"`,
-      `"Lead Manager","${fund.manager.name}"`,
-      `"Manager Tenure (Years)","${fund.manager.tenureYears}"`,
-      ``,
-      `"TRAILING RETURNS"`,
-      `"Period","Return / CAGR (%)"`,
-      `"3 Months (Absolute)","${cagr['3M'] ?? 'N/A'}"`,
-      `"6 Months (Absolute)","${cagr['6M'] ?? 'N/A'}"`,
-      `"1 Year (CAGR)","${cagr['1Y'] ?? 'N/A'}"`,
-      `"3 Years (CAGR)","${cagr['3Y'] ?? 'N/A'}"`,
-      `"5 Years (CAGR)","${cagr['5Y'] ?? 'N/A'}"`,
-      `"7 Years (CAGR)","${cagr['7Y'] ?? 'N/A'}"`,
-      `"10 Years (CAGR)","${cagr['10Y'] ?? 'N/A'}"`,
-      ``,
-      `"ROLLING RETURN DISTRIBUTIONS & HIT RATES"`,
-      `"Window","Mean (%)","Median (%)","Min (%)","Max (%)","25th %ile","75th %ile","Std Dev","% Positive Windows","Benchmark Hit Rate (%)"`,
-      `"1-Year Rolling","${r1.count > 0 ? r1.mean : 'N/A'}","${r1.count > 0 ? r1.median : 'N/A'}","${r1.count > 0 ? r1.min : 'N/A'}","${r1.count > 0 ? r1.max : 'N/A'}","${r1.count > 0 ? r1.q25 : 'N/A'}","${r1.count > 0 ? r1.q75 : 'N/A'}","${r1.count > 0 ? r1.std : 'N/A'}","${r1.count > 0 ? r1.pctPositive + '%' : 'N/A'}","${hit1 !== undefined ? hit1 + '%' : 'N/A'}"`,
-      `"3-Year Rolling","${r3.count > 0 ? r3.mean : 'N/A'}","${r3.count > 0 ? r3.median : 'N/A'}","${r3.count > 0 ? r3.min : 'N/A'}","${r3.count > 0 ? r3.max : 'N/A'}","${r3.count > 0 ? r3.q25 : 'N/A'}","${r3.count > 0 ? r3.q75 : 'N/A'}","${r3.count > 0 ? r3.std : 'N/A'}","${r3.count > 0 ? r3.pctPositive + '%' : 'N/A'}","${hit3 !== undefined ? hit3 + '%' : 'N/A'}"`,
-      `"5-Year Rolling","${r5.count > 0 ? r5.mean : 'N/A'}","${r5.count > 0 ? r5.median : 'N/A'}","${r5.count > 0 ? r5.min : 'N/A'}","${r5.count > 0 ? r5.max : 'N/A'}","${r5.count > 0 ? r5.q25 : 'N/A'}","${r5.count > 0 ? r5.q75 : 'N/A'}","${r5.count > 0 ? r5.std : 'N/A'}","${r5.count > 0 ? r5.pctPositive + '%' : 'N/A'}","${hit5 !== undefined ? hit5 + '%' : 'N/A'}"`,
-      `"7-Year Rolling","${r7.count > 0 ? r7.mean : 'N/A'}","${r7.count > 0 ? r7.median : 'N/A'}","${r7.count > 0 ? r7.min : 'N/A'}","${r7.count > 0 ? r7.max : 'N/A'}","${r7.count > 0 ? r7.q25 : 'N/A'}","${r7.count > 0 ? r7.q75 : 'N/A'}","${r7.count > 0 ? r7.std : 'N/A'}","${r7.count > 0 ? r7.pctPositive + '%' : 'N/A'}","${hit7 !== undefined ? hit7 + '%' : 'N/A'}"`,
-      ``,
-      `"RISK RATIOS & ACTIVE METRICS"`,
-      `"Metric","Value"`,
-      `"Annualized Volatility (%)","${rm?.volatility ?? 'N/A'}"`,
-      `"Sharpe Ratio","${rm?.sharpe ?? 'N/A'}"`,
-      `"Sortino Ratio","${rm?.sortino ?? 'N/A'}"`,
-      `"Beta","${rm?.beta ?? 'N/A'}"`,
-      `"Jensen's Alpha (%)","${rm?.jensensAlpha ?? 'N/A'}"`,
-      `"R-Squared","${rm?.rSquared ?? 'N/A'}"`,
-      `"Tracking Error (%)","${rm?.trackingError ?? 'N/A'}"`,
-      `"Information Ratio","${rm?.informationRatio ?? 'N/A'}"`,
-      `"Maximum Drawdown (%)","${rm?.maxDrawdown ?? 'N/A'}"`,
-      `"Recovery Period (Days)","${rm?.recoveryDays ?? 'N/A'}"`,
-      `"Calmar Ratio","${rm?.calmarRatio ?? 'N/A'}"`,
-      `"Upside Capture (%)","${rm?.upsideCapture ?? 'N/A'}"`,
-      `"Downside Capture (%)","${rm?.downsideCapture ?? 'N/A'}"`,
-      ``,
-      `"PORTFOLIO HOLDINGS & LIQUIDITY"`,
-      `"ISIN","Security Name","Sector","Market Cap","Weight (%)","30D ADTV (Cr INR)"`,
-      ...fund.holdings.map((h) => `"${h.isin}","${h.name}","${h.sector}","${h.mcap}",${h.weight},${h.adtv_cr}`),
-    ];
-
-    const csvContent = lines.join('\n');
-    const filename = getExportFilename('Factsheet', 'csv', fund.name);
-    triggerDownload(filename, csvContent, 'text/csv');
+    triggerDownload(
+      getExportFilename('Factsheet', 'csv', fund.name),
+      buildSingleFundFactsheetCsv(fund, builderInput),
+      'text/csv'
+    );
   };
 
-  // 4. Export Raw Daily NAV Series CSV (Full unsampled union of business days)
   const handleExportRawNavCsv = () => {
-    // Construct the complete union of authentic trading dates
-    const allDatesSet = new Set<string>();
-    benchmarkSeries.forEach((p) => allDatesSet.add(p.date));
-    selectedFunds.forEach((f) => {
-      const s = seriesMap[f.scheme_code] || [];
-      s.forEach((p) => allDatesSet.add(p.date));
-    });
-
-    const dates = Array.from(allDatesSet).sort();
-    const benchMap = new Map(benchmarkSeries.map((p) => [p.date, p.nav]));
-    const fundMaps = selectedFunds.map((f) => ({
-      name: f.name,
-      map: new Map((seriesMap[f.scheme_code] || []).map((p) => [p.date, p.nav])),
-    }));
-
-    const metadataProvenanceLines = [
-      `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio`,
-      `# NAV Time-Series: Full Unsampled Daily Observations from AMFI India`,
-      `# Benchmark: ${benchmarkName} Total Returns Index (TRI)`,
-      `# Calendar: Strict Indian Business Days (Zero Weekend Rows)`,
-      `# Export Timestamp: ${new Date().toISOString()}`,
-      `# Total Observations: ${dates.length} Trading Days`,
-      `#`,
-    ];
-
-    const headers = ['Date', `Benchmark_${sanitizeName(benchmarkName)}`, ...selectedFunds.map((f) => `"${f.name}"`)];
-    const rows: string[] = [];
-
-    dates.forEach((d) => {
-      const bNav = benchMap.get(d) ?? '';
-      const fundNavs = fundMaps.map((fm) => {
-        const nav = fm.map.get(d);
-        return nav !== undefined ? nav : '';
-      });
-      rows.push([d, bNav, ...fundNavs].join(','));
-    });
-
-    const csvContent = [...metadataProvenanceLines, headers.join(','), ...rows].join('\n');
-    const filename = getExportFilename('Daily_NAV_Timeseries', 'csv');
-    triggerDownload(filename, csvContent, 'text/csv');
+    triggerDownload(
+      getExportFilename('Daily_NAV_Timeseries', 'csv'),
+      buildRawNavCsv(builderInput),
+      'text/csv'
+    );
   };
 
   return (
@@ -458,7 +630,7 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
               <span>Export Mutual Fund Analytics</span>
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Exports include fund name(s), download timestamp, complete 1y/3y/5y/7y rolling spreads & hit rates, and data provenance headers.
+              Synchronized with validated scheme identities, Rf={rfRate.toFixed(2)}%, and benchmark availability ({benchmarkStatus.available ? benchmarkStatus.variant : 'Unavailable'}).
             </p>
           </div>
           <button
@@ -477,7 +649,6 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
             </div>
           )}
 
-          {/* Option 1: Full Comparison CSV */}
           <div
             onClick={handleExportComparisonCsv}
             className="p-4 bg-slate-900/80 border border-slate-800 hover:border-indigo-500/50 hover:bg-slate-800/60 rounded-xl cursor-pointer transition-all flex items-center justify-between group shadow-xs"
@@ -491,7 +662,7 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
                   Full Comparison Report (CSV)
                 </div>
                 <div className="text-xs text-slate-400 mt-0.5">
-                  Complete 1Y/3Y/5Y/7Y rolling statistics, hit rates, trailing CAGRs, risk metrics, and provenance headers.
+                  Includes scheme identity status, validation window, and &ldquo;Unavailable&rdquo; markers for unsupported benchmark metrics.
                 </div>
               </div>
             </div>
@@ -500,7 +671,6 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
             </button>
           </div>
 
-          {/* Option 2: Full Structured JSON */}
           <div
             onClick={handleExportComparisonJson}
             className="p-4 bg-slate-900/80 border border-slate-800 hover:border-indigo-500/50 hover:bg-slate-800/60 rounded-xl cursor-pointer transition-all flex items-center justify-between group shadow-xs"
@@ -514,7 +684,7 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
                   Complete Analytics Package (JSON)
                 </div>
                 <div className="text-xs text-slate-400 mt-0.5">
-                  Structured payload with nested 1Y/3Y/5Y/7Y rolling distributions, holdings, and metadata provenance.
+                  Exact structured parity with UI state: null metrics + unavailableReasons + validation report + Rf applied.
                 </div>
               </div>
             </div>
@@ -523,7 +693,6 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
             </button>
           </div>
 
-          {/* Option 3: Single Fund Dossier CSV */}
           <div className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3.5 min-w-0">
@@ -531,9 +700,9 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
                   <Sparkles className="w-5 h-5" />
                 </div>
                 <div className="min-w-0">
-                  <div className="text-sm font-semibold text-white">Single Fund Factsheet & Holdings (CSV)</div>
+                  <div className="text-sm font-semibold text-white">Single Fund Factsheet &amp; Holdings (CSV)</div>
                   <div className="text-xs text-slate-400 mt-0.5">
-                    Individual dossier with look-through equity holdings, ISINs, and liquidity days.
+                    Individual dossier with disclosure provenance, validation window, and holdings availability.
                   </div>
                 </div>
               </div>
@@ -564,7 +733,6 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
             </div>
           </div>
 
-          {/* Option 4: Full Unsampled Daily NAV Timeseries CSV */}
           <div
             onClick={handleExportRawNavCsv}
             className="p-4 bg-slate-900/80 border border-slate-800 hover:border-indigo-500/50 hover:bg-slate-800/60 rounded-xl cursor-pointer transition-all flex items-center justify-between group shadow-xs"
@@ -575,10 +743,10 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
               </div>
               <div className="min-w-0">
                 <div className="text-sm font-semibold text-white group-hover:text-indigo-300 transition-colors">
-                  Raw Daily NAV Time-Series (CSV)
+                  Raw Validated Daily NAV Time-Series (CSV)
                 </div>
                 <div className="text-xs text-slate-400 mt-0.5">
-                  Complete unsampled union of authentic trading days (3,000+ points) for all selected funds and benchmark.
+                  All validated mfapi.in sessions for selected funds; benchmark column marks Unavailable if unverified.
                 </div>
               </div>
             </div>
@@ -589,8 +757,8 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
         </div>
 
         <div className="p-4 bg-slate-950/80 border-t border-slate-800 flex items-center justify-between text-xs text-slate-500">
-          <span>{selectedFunds.length} scheme(s) selected</span>
-          <span className="font-mono">AMFI Sync Active</span>
+          <span>{selectedFunds.length} scheme(s) active</span>
+          <span className="font-mono">Source: mfapi.in + AMFI {AMFI_SNAPSHOT_DATE}</span>
         </div>
       </div>
     </div>

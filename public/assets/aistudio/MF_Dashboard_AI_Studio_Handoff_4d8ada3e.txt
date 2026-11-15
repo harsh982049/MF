@@ -1,0 +1,284 @@
+MUTUAL FUND DASHBOARD | GOOGLE AI STUDIO IMPLEMENTATION HANDOFF
+
+Repository  https://github.com/harsh982049/MF
+Branch audited  main
+Audit baseline  df232bd3f21e8a9c463d859b726d683b7b24deb2
+Audit date  15 November 2026 IST
+
+FIRST MESSAGE FOR GOOGLE AI STUDIO
+
+Work in the existing MF dashboard project. Implement Batch 1 in this handoff only.
+Use the remaining batches and evidence appendix as context. Do not implement later
+batches until I explicitly name one. Inspect the current branch and code first.
+If the branch is newer than the audit baseline, verify which findings still
+reproduce. Preserve intervening work and report the starting revision.
+
+The immediate goal is to stop the web app from reporting investment metrics backed
+by a different scheme, invented benchmark, invented fund facts or insufficient data.
+Verified fund-only observations should remain usable. Use “Unavailable” and a
+specific reason when a value cannot be supported, with the same semantics in app
+screens, CSV and JSON. If a source is unavailable, complete the fallback behavior
+and report the missing source. Source acquisition and expanded analytics are staged
+for later batches.
+
+At the end, report the starting and resulting revisions, issue IDs addressed,
+files changed, exact tests and outcomes, and unresolved issues. Distinguish tests
+that passed, failed, were blocked or were not run. Provide a diff or change summary
+for review. Use the project's existing commit and push workflow when available.
+If no GitHub connection is available, work in the existing project and report
+what is needed to sync the changes before independent verification.
+
+BATCH 1 | FINANCIAL OUTPUT SAFETY AND SCHEME IDENTITY
+
+Scope — MF-001, MF-002, MF-003, MF-006, MF-007 and MF-008.
+Primary files — src/App.tsx, src/types/quant.ts, src/data/presetFunds.ts,
+src/data/genuineBenchmarks.ts, src/utils/mfapiClassifier.ts,
+src/utils/quantEngine.ts, src/components/FundSearchModal.tsx,
+src/components/FundFactsheetModal.tsx and src/components/DataExportModal.tsx.
+
+1. Validate every selectable preset and search result against the exact scheme
+   code, plan, option and effective ISIN. A known scheme name with mismatched code
+   or plan must be unavailable until resolved. Reconcile all nine presets with a
+   dated AMFI registry. Use Table A below as historical test evidence. Avoid
+   guessing replacement codes. The NAV loader may consume the third-party MFAPI
+   feed after matching identity and checking date, value and freshness.
+2. Remove the generated benchmark from research results. The existing generator
+   derives the series from the lead fund and assigns old anchors to new dates.
+   Until an independent, verified total-return series exists, display unavailable
+   benchmark levels, comparison lines, alpha, beta, R², capture, tracking error,
+   information ratio and hit rates. Calculate independent fund-only results from
+   independently validated fund data. A missing benchmark must not silently
+   generate its own observations or force fund-only risk metrics to zero.
+3. Remove guessed scheme holdings, AUM, TER, manager, inception, exit load,
+   riskometer and debt statistics from discovered-fund research records. Use
+   dated AMC evidence per field where available. Render unknown overlap,
+   exposures, liquidity and credit metrics unavailable. Preserve genuine zeroes.
+4. Validate finite positive NAV, actual valid dates, duplicate conflicts, freshness
+   and scheme identity. Quarantine unresolved corporate-action breaks for affected
+   analytics, with a user-visible explanation. Preserve raw source observations
+   with their date and source. Actual split-aware series construction is Batch 2.
+5. Make UI, raw NAV export, comparison CSV, factsheet CSV and JSON reflect the
+   exact same identities, inputs and null reasons. Remove misleading official
+   labels and hard-coded provenance. Capture actual window, as-of, provider and
+   benchmark variant where supported. Separate MFAPI from official AMFI. Record the
+   risk-free assumption actually applied whenever an affected value is emitted.
+6. Gate any Batch 1 output that would otherwise expose a misleading default.
+   Keep the Python remediation in Batch 3. If the web app exposes the legacy
+   Python download, put a prominent status on it explaining the audited build
+   and data failures while remediation is pending.
+
+Batch 1 acceptance checks
+- Fixtures for exact identity, wrong scheme, wrong plan, unresolved ISIN,
+  stale dates, invalid dates, duplicate conflicts, empty inputs, nonpositive
+  and infinite NAV, HTTP errors and an unknown benchmark.
+- Lead-fund reordering or removal never creates a benchmark or changes its
+  availability because of fund returns. A missing benchmark leaves validated
+  fund-only observations usable and benchmark-dependent metrics unavailable.
+- No holdings fixture yields unavailable overlap, exposures and liquidity.
+- Insufficient, flat and one-sign return data cannot emit unsupported numeric
+  defaults. A true zero remains a numeric zero.
+- The nine-preset reconciliation is reviewable. 118989 cannot be shown as HDFC
+  Top 100 when the provider identifies HDFC Mid Cap. 120503 cannot appear as
+  ICICI Corporate Bond and 120586 cannot appear as Balanced Advantage with the
+  audited provider responses. 127042 uses INF247L01445 for Direct Growth.
+- The test UI and captured CSV/JSON outputs agree on identity, source status
+  and the presence or absence of benchmark metrics. HDFC Gold ETF split-spanning
+  outputs are unavailable until the action is validated. Test all web export paths.
+
+LATER BATCHES | IMPLEMENT ONLY THE NEXT BATCH I EXPLICITLY REQUEST
+
+BATCH 2 | Add independent total-return and corporate-action sources
+
+Address MF-001, MF-006, MF-008 and upstream portions of MF-010 in src/data/genuineBenchmarks.ts, src/App.tsx, src/data/presetFunds.ts, src/utils/quantEngine.ts and the corresponding canonical Python loader. Build an explicit benchmark registry keyed by source ID, currency, price/gross/net variant, effective dates and role. Source Nifty 500 TRI for PPFAS and Nifty Midcap 150 TRI for MO, following official AMC benchmark definitions. Use the index provider's date-stamped historical TRI feed or a permitted, versioned imported snapshot. A user-selected common comparator must carry its own role and actual ID on every output. Debt, gold/silver and INR international comparisons stay unavailable until exact suitable histories exist. Do not map them to a generic equity index.
+
+Maintain raw and action-adjusted NAV series, exact source URI, checksum and corporate-action IDs. In HDFC Gold ETF code 113049, use exchange split evidence for 100:1 and compare the 19/22 Feb 2021 levels. A complete treatment must handle pre/post ISIN, duplicate processing, unresolved large moves, late corrections and nonpositive NAV. Benchmark join must only compare returns on identical start/end periods. Use market holiday/session sources with a scheme-aware NAV calendar. Distinguish benchmark session days from dates in raw fund NAV union.
+
+Acceptance. Identical TRI across reordered funds, missing funds, different chart horizons and repeated imports. Pin checkpoints to actual dates and verify provider history, including +1.02% and −0.55% secondary diagnostics as investigation prompts only. Corporate action test raw −98.99% becomes about +0.78% on comparable scale across the two observed dates. Reapplying factor is idempotent. Include no-TRI and wrong-variant failure tests with explicit unavailable status.
+
+BATCH 3 | Restore canonical Python and reproducible builds
+
+Address MF-004, MF-005, MF-016 and MF-017 in data_loader.py, app.py, quant_engine.py, stress_test.py, overlap_engine.py, src/components/PythonExporter.tsx, package.json, requirements.txt and CI. Restore valid error handling around fetch_fund_nav_mfapi. Remove synthetic NAV and benchmark fallbacks in all research entry points. Avoid unverified Yahoo Close for TRI. Use the source registry and snapshots from prompts 1 and 2. Replace embedded legacy Python copies with a versioned build/download generated from canonical source, including a functional Streamlit entry point and resolved requirements. Keep missing data missing. Never prefill a fund to dates before inception or create observed zero returns from gaps.
+
+Resolve the observed Vite/esbuild peer mismatch and track appropriate lockfiles. CI must exercise an ordinary clean install, lint, build, Python compilation, import, Streamlit smoke and exported-package smoke. Record resolved dependencies and audit scope. Acceptance. Normal npm ci without legacy-peer override. Every canonical Python module compiles. Through a service outage both the root and downloaded Python report unavailable. Fund inception and skipped-session fixtures preserve gaps. Canonical and downloadable archives agree from the same commit.
+
+BATCH 4 | Standardise return/risk methods, SIP and exports
+
+Address MF-006, MF-007, MF-009–011, MF-015 and MF-018 in src/App.tsx, src/utils/quantEngine.ts, quant_engine.py, src/components/QuantVisuals.tsx and DataExportModal.tsx. Dependencies are prompt 1 and source contract from prompt 2. Define exact calendar trailing offsets and max allowed endpoint lag. Absolute for subannual flows, explicit calendar CAGR for multiyear returns. Expose actual start/end, frequency, gaps and sample count. Separate fund-only returns from benchmark comparison. Publish arithmetic Sharpe and IR conventions, effective periodic RF, MAR, periodic OLS intercept and beta, separate excess CAGR and tracking difference, standard TE, and precise geometric capture convention. Distinguish trough recovery from underwater period. For rolling use identical starts and ends, retain full precision, and handle ties/zero correctly.
+
+Use documented SIP schedule, exact contribution ledger, terminal valuation, ACT/365 and bracketed XIRR convergence. Surface unavailable if no valid flows or source. Never substitute benchmark for a requested scheme. Export the exact result contract into RFC 4180 CSV and JSON. Sanitize spreadsheet formulas in external text and preserve numeric negative values. Include quote/newline and alternate benchmark cases.
+
+Acceptance. For 13-Nov-2026, AMFI PPFAS/MO 1Y rounds to 0.27%/3.93%, and 6M to 5.02%/18.64%, subject to explicit calendar and observed-source fixtures. Test leap day, inception, sparse dates, NAV 100→110→99, zero benchmark variance, constant active spread, idempotent csv round-trip and RF change from 6.5% to 4.5%. Use 3-month and 6-month schedule fixtures of three and six ₹10,000 instalments. Report cash flow XIRR residual. Compare Python and TypeScript on shared cases.
+
+BATCH 5 | Source holdings, debt, liquidity and execution terms
+
+Address MF-003, MF-012–014 and MF-021 in src/data/presetFunds.ts, src/utils/mfapiClassifier.ts, src/types/quant.ts, src/utils/quantEngine.ts, src/App.tsx, FundFactsheetModal, overlap_engine.py, stress_test.py and app.py. Ingest dated monthly AMC security-level disclosures. Store instruments, normalized ISINs, asset taxonomy, book date, NAV weights, net cash/derivative handling, unresolved coverage and issuer groups. Join AMFI effective-dated rank classification for domestic stocks. Use min of summed same-ISIN weights after grouping, clearly identifying denominator and unknown weight. Add concentration and valuation computations only with audited denominators. For valid P/E and P/B use earnings and book yields on sourced comparable exposures and invert after aggregation if meaningful. Expose nonpositive and missing coverage.
+
+For mid/small cap published stress figures, ingest the AMC/AMFI disclosure separately. For a modeled liquidity scenario, document eligible positions and solve cumulative capacity with partial sales. Do not apply regulatory labels to generic ADTV stress. For debt, use sourced YTM, average maturity, MD/MacD, rating mix, issuer-group, sovereign and PRC. Where convexity missing show a first-order rate scenario with documented scope. Use current AMC SID/KIM/addenda for plan-specific TER and effective exit loads. Include September/October AUM dating across PPFAS and the MO 15-day/365-day discrepancy in execution test cases.
+
+Acceptance. Missing holdings produce null. Two equal-capacity illustrative positions of 25 and 75 at 10 per day reach 25/50 at 1.25/2.50 days under continuous parallel-sale convention. Test zero capacity and residual weights, exact dates, duplicate symbols, cash and ETF look-through. Use MD=2 and +100bp → −2% with zero convexity. Published disclosures must reconcile to an AMC source and coverage.
+
+BATCH 6 | Improve ingestion and observable data quality
+
+Address MF-006, MF-017–019 in src/App.tsx, FundSearchModal.tsx, presetFunds.ts, DataExportModal.tsx, vite.config.ts and production ingestion. Use one wrapper with consistent HTTP failure semantics, timeouts, capped retry/backoff and deduplication. Separate request lifecycle from chart horizon and normalized return policy. Prevent stale query response from overwriting a newer query. Keep source status and freshness visible in every investment screen and schema export. Record valuation date, expected/observed intervals, hash, start/end and gaps. Assess bundle, dependency footprint and reconciled cache TTLs. Do not require user-visible credentials for public data.
+
+Acceptance. Switch duration with no extra historical NAV fetches. Prove out-of-order search, duplicate add, error + retry, and 429 recoveries. A successful download in one tab must carry the same metadata and source state as another tab. Pass CSV text injection and parsing regression checks. Depend on prompt 1 gate and prompt 4 shared analytics contract.
+
+BATCH 7 | Add portfolio, category scorecards and tax-aware research
+
+Address MF-020 and downstream MF-021 when validated identity, NAV and benchmark data are stable. Extend src/App.tsx and the canonical shared calculations with saved multiple user-defined portfolios, allocation and timing rules, SIP/step-up, rebalancing cash flows, fund look-through and risk contributions. Compare alternatives on common history and cost assumptions, preserving inception rules, unknown past holdings, benchmark proxy distinctions and possible survivorship bias. Use category-specific evidence. Active uses matched risk and holdings, passive uses TD/TE and cost, debt uses rate/credit/liquidity, ETFs use spread/premium and two-layer FoF fees, international uses INR TRI and acquisition constraints.
+
+Implement versioned statutory tax scenarios after a separate legal source check. Use applicable Act by transfer date, defined scheme classification, resident assumptions, acquisition cohorts, qualifying-exposure tests, STT and investor-level threshold where applicable. Treat cash flows as individual lots, model applicable exit terms separately, and expose gross, post-cost and tax assumptions. Historical NAV already embeds TER. Acceptance. Reconcile hand-calculated weights, value and flow ledger across rebalances. Test unavailable early fund history, ineligible fund treatment, notional index proxy, taxable gain on selected lots and rule-date boundaries. Compare B/D/E as user-defined cases only when input sources and assumptions can be verified.
+
+EVIDENCE APPENDIX | HISTORICAL TEST INPUTS, FINDINGS AND SOURCES
+
+These records document the audit baseline. Use official current evidence for production updates.
+Historical references in this appendix do not certify coverage of a full series.
+
+Table A — Nine-preset reconciliation, AMFI snapshot 13 November 2026
+AMFI snapshot  https://www.amfiindia.com/spages/NAVAll.txt
+122639 | preset Parag Parikh Flexi Cap Fund / INF879O01027 | AMFI Parag Parikh Flexi Cap Fund | INF879O01027 | Direct Plan | Growth | 94.2594 | Match
+127042 | preset Motilal Oswal Midcap Fund / INF247L01646 | AMFI Motilal Oswal Midcap Fund | INF247L01445 | 123.0732 | ISIN mismatch
+118989 | preset HDFC Top 100 Large Cap Fund / INF179K01BE2 | AMFI HDFC Mid Cap Fund | INF179K01XQ0 | Direct Plan | Growth Option | 229.697 | Cross-scheme mismatch
+118778 | preset Nippon India Small Cap Fund / INF204K01726 | AMFI Nippon India Small Cap Fund | INF204K01K15 | Direct Plan | Growth Option | 204.2367 | ISIN mismatch
+119598 | preset SBI Bluechip Large Cap Fund / INF200K01135 | AMFI SBI Large Cap Fund | INF200K01QX4 | Direct Plan | Growth | 107.5881 | ISIN mismatch
+120503 | preset ICICI Prudential Corporate Bond Fund / INF109K01AQ5 | AMFI Axis ELSS- Tax Saver Fund | INF846K01EW2 | Direct Plan | Growth Option | 116.1262 | Cross-scheme mismatch
+120586 | preset ICICI Prudential Balanced Advantage Fund / INF109K01844 | AMFI ICICI Prudential Large Cap Fund (erstwhile Bluechip Fund) | INF109K016L0 | Direct Plan | Growth | 123.25 | Cross-scheme mismatch
+118753 | preset Nippon India Gold Savings Fund / INF204K01585 | AMFI absent from snapshot | Missing from report
+145552 | preset Motilal Oswal Nasdaq 100 FoF / INF247L01786 | AMFI Motilal Oswal Nasdaq 100 Fund of Fund | INF247L01718 | 63.7597 | ISIN mismatch
+AMFI omitted the plan/option label on some latest-file rows. For code 127042, the official historical row identifies Direct Plan Growth and INF247L01445. Verify plan and option independently where fields are blank. Absence from one snapshot does not establish retirement.
+
+Table B — Exact NAV inputs for calendar return tests
+Date          PPFAS Direct Growth (122639)    MO Midcap Direct Growth (127042)
+2026-11-13     94.2594                       123.0732
+2026-08-13     91.7971                       121.3260
+2026-05-13     89.7575                       103.7341
+2025-11-13     94.0058                       118.4212
+2023-11-13     65.3870                        72.9802
+As of 13 Nov 2026, expected 1Y 0.27% / 3.93% and 6M 5.02% / 18.64%. The audited app reported 0.09% / 3.45% and 4.31% / 17.39%. For 6M use 13 May, and for 1Y use 13 November 2025. Compute end/start minus 1.
+AMFI historical record route  https://www.amfiindia.com/net-asset-value/nav-download
+
+Other numerical reproduction cases
+- Lead fund reversal changed the generated Nifty 500 point for 2 Jan 2024 from 48,038.34 to 42,777.28 and PPFAS beta from 0.62 to 0.33. The app attached historical 5/6 Nov anchors, 62,060.55 and 62,693.58, to 12/13 Nov. These are simulated values from the audited app.
+- Gold ETF code 113049 NAVs were 4,120.0604 on 19 Feb 2021 and 41.5242 on 22 Feb. The comparable calculation is 41.5242 / (4,120.0604 / 100) − 1, about +0.78%. The unadjusted move was −98.99%. Verify the action separately before re-enabling affected analytics.
+- No holdings yielded 100% liquid within three days. Two empty fund histories yielded 0.8 correlation. Both cases require unavailable outputs.
+- With ₹10,000 payments, audited 3M and 6M SIPs both used 13 instalments. The scheduled fixture should use three and six payments respectively, with a separately valued terminal portfolio.
+- PPFAS and MO full-history drawdowns matched −31.20% and −37.23% on available vendor snapshots. Coverage of those histories and period-specific risk remained separate checks.
+- The read-only audit ran the built web app in an isolated DOM replay using frozen inputs. Default npm install failed on a Vite/esbuild peer conflict. Build and lint passed with a temporary legacy-peer install. Root Python failed py_compile at data_loader.py:216. Full browser visuals, official long-history TRI replacement metrics and exact holdings overlap remain unverified.
+
+Complete issue index
+
+MF-001 [P0] Synthetic TRI and circular performance
+src/data/genuineBenchmarks.ts:115-206;src/App.tsx:149-157
+Observed — Changing the lead fund changed 2 Jan 2024 Nifty 500 level from 48,038.34 to 42,777.28 and changed PPFAS beta from 0.62 to 0.33.
+Acceptance — Same index/date must be bit-identical through fund reorder, unavailable lead, and additions. Match official levels and actual session dates.
+
+MF-002 [P0] Wrong scheme and plan identifiers
+src/data/presetFunds.ts:91-137;src/data/presetFunds.ts:210-437;data_loader.py:25-146
+Observed — 118989 HDFC Mid Cap shown as HDFC Top 100. 120503 Axis ELSS shown as ICICI Corporate Bond. 120586 ICICI Large Cap shown as Balanced Advantage. Code 127042 has wrong ISIN. See scheme checks.
+Acceptance — Test all 9 presets against a pinned AMFI registry and payload mismatch fixture.
+
+MF-003 [P0] Fabricated discovered fund facts
+src/utils/mfapiClassifier.ts:74-253;src/App.tsx:170-213;src/components/FundFactsheetModal.tsx:228-237
+Observed — Search addition can expose sample holdings, fixed inception/charges and false sourced factsheet footer. A launch failure can still select an unresolved scheme.
+Acceptance — No AMC file means unavailable holdings, AUM, TER, manager, riskometer, YTM, duration, PRC and exit load.
+
+MF-004 [P0] Root Python entry point cannot parse
+data_loader.py:197-217;app.py:19-26
+Observed — python -m py_compile *.py exited 1 at data_loader.py line 216. Streamlit imports the module.
+Acceptance — Run all Python py_compile, import and Streamlit smoke checks, including timeout.
+
+MF-005 [P0] Python and downloaded Python accept synthetic histories
+data_loader.py:220-258;src/components/PythonExporter.tsx:81-144;src/components/PythonExporter.tsx:369-390
+Observed — Reproducible package routes diverge. Restoring import alone would activate unreliable benchmark inputs.
+Acceptance — Offline benchmark and NAV outage return explicit missing. Compare downloaded files to canonical checksums and smoke run.
+
+MF-006 [P0] False export provenance and inconsistent benchmark
+src/components/DataExportModal.tsx:119-127;src/components/DataExportModal.tsx:209-220;src/components/DataExportModal.tsx:299-327;src/components/DataExportModal.tsx:408-448
+Observed — Structured JSON and raw CSV generated with false benchmark attribution. MO benchmark field suggests Midcap TRI while default risk uses Nifty 500 simulation.
+Acceptance — Toggle RF to 4.5% and alternate index. UI and all CSV/JSON outputs must agree and identify benchmark role.
+
+MF-007 [P0] Missing and undefined metrics become plausible values
+src/utils/quantEngine.ts:226-251;src/utils/quantEngine.ts:291-364;src/utils/quantEngine.ts:495-517;src/utils/quantEngine.ts:679-695;quant_engine.py:74-79
+Observed — Empty portfolio reports 100% liquid within 3 days. Two empty funds report 0.8 correlation. Statistical fallback can enter exports.
+Acceptance — Run no data, short, flat, zero variance and one-sign benchmark fixtures. No finite unsupported fields in UI, CSV or JSON.
+
+MF-008 [P0] ETF split and nonpositive data
+src/data/presetFunds.ts:456-477;src/utils/quantEngine.ts:114-124;src/utils/quantEngine.ts:304-348;src/utils/quantEngine.ts:434-455
+Observed — HDFC Gold ETF split observed as -98.99% daily and -99.21% full-series drawdown. Axis ELSS history contains zero NAV on 7 Apr 2013.
+Acceptance — 19–22 Feb 2021 HDFC Gold returns about +0.78% after factor 100. Reject a zero denominator and never double-adjust.
+
+MF-009 [P1] Calendar horizon and endpoint errors
+src/utils/quantEngine.ts:39-79;quant_engine.py:17-44;src/App.tsx:346-366
+Observed — PPFAS 1Y 0.09% vs official endpoints 0.27%. MO 1Y 3.45% vs 3.93%. Python short history may be presented as 10Y.
+Acceptance — Test same-day anniversaries, leap day, holidays, 89/90/91 day quarters, inception and long gaps.
+
+MF-010 [P1] Mixed risk sampling and methods
+src/utils/quantEngine.ts:193-302;quant_engine.py:115-230;src/App.tsx:255-270
+Observed — Risk panel does not follow duration selector. Synthetic/short benchmark coverage influences volatility, drawdown and CAGR. Sharpe/IR differ from arithmetic definitions.
+Acceptance — On known vector 100, 110, 99 verify returns 10%, -10%, MDD -10%. Run matched frequency, zero variance and risk-free compounding fixtures.
+
+MF-011 [P1] Rolling dates, dispersion and precision
+src/utils/quantEngine.ts:91-186;quant_engine.py:49-112
+Observed — Ties can be fabricated when two nearby returns round to the same number. Flat windows counted as negative in both engines.
+Acceptance — Exercise missing sessions, exact tie, 0%, [0,1,2,3] linear p25=.75, and unrounded active differences.
+
+MF-012 [P1] Partial holdings, identity and normalisation
+src/data/presetFunds.ts:73-87;src/data/presetFunds.ts:120-132;src/utils/quantEngine.ts:580-675;overlap_engine.py:142-278
+Observed — 0% PPFAS–MO overlap is only a result of the visible rows. Mock ADTV and unidentified weight undermine concentration and stress.
+Acceptance — Known duplicate ISIN fixture must be symmetric. Missing portfolio returns null, partial coverage stays visible, cash exclusion uses explicit taxonomy.
+
+MF-013 [P0] Liquidity labelled SEBI and incorrect liquidation algorithm
+src/App.tsx:1112-1125;src/utils/quantEngine.ts:679-745;stress_test.py:19-94
+Observed — Two positions worth 25 and 75 with daily capacities 10 each should reach 25/50 in 1.25/2.50 days under continuous parallel sales. TS gives 2.5/7.5.
+Acceptance — Reproduce published disclosure or show model status. Check target math, zero ADTV, 7–10 bucket, cash and insufficient coverage.
+
+MF-014 [P1] Debt inputs are placeholders and duration assumptions undocumented
+src/App.tsx:308-344;src/utils/quantEngine.ts:749-770;stress_test.py:100-165;app.py:335-362
+Observed — Rate sensitivity looks fund-specific with no reliable maturity, credit, duration or benchmark. Python root currently blocked.
+Acceptance — Dmod=2 and +100bp with C=0 yields -2%. Missing convexity exposes first-order-only scenario or null.
+
+MF-015 [P1] SIP fractional horizons and substitution
+src/App.tsx:302-306;src/utils/quantEngine.ts:394-489
+Observed — 3M and 6M fixture both generated 13 × ₹10,000. Final timeline excludes terminal valuation point; wrong scheme risk when SIP target absent.
+Acceptance — 3-month schedule has documented 3 payments in fixture. NPV residual within tolerance and outage remains unavailable. Terminating values match timeline.
+
+MF-016 [P1] Python forward/backfill corrupts availability
+data_loader.py:304-339;app.py:124-128;app.py:229-237
+Observed — Pre-inception synthetic flat history and zero returns; mismatched cross-asset trading dates.
+Acceptance — Fund launched 2022 yields no 2019 levels. Missing midweek date must never become an observed zero return.
+
+MF-017 [P1] Frontend reproducibility and package security
+package.json:6-33;vite.config.ts:7-25;requirements.txt:1-7
+Observed — Normal npm install failed ERESOLVE; only local legacy resolver build passed. Versions and audit results may drift.
+Acceptance — Fresh npm ci, lint and build with no peer override. Python lock and smoke tests pass. Record resolved vulnerable paths.
+
+MF-018 [P1] Export CSV injection and structure
+src/components/DataExportModal.tsx:209-293;src/components/DataExportModal.tsx:342-402;src/components/DataExportModal.tsx:424-446
+Observed — Unescaped quotes/newlines corrupt fields and spreadsheet formula prefixes can execute when opened. Exploit requires externally supplied crafted text.
+Acceptance — Round-trip quotes, comma, CRLF and Unicode. Test leading =,+,-,@ and tabs in text cells while preserving numeric negatives.
+
+MF-019 [P1] Search races and weak cache/source validation
+src/App.tsx:125-147;src/App.tsx:170-213;src/components/FundSearchModal.tsx:93-192;src/data/presetFunds.ts:456-489
+Observed — Stale or failed search can overwrite another result or show a success message for invalid inputs. Vite dev proxy is no production ingestion service.
+Acceptance — Switch horizon causes zero NAV fetches. Rapid out-of-order search and duplicate add remain deterministic. 429 and stale responses are explicit.
+
+MF-020 [P2] Portfolio research and execution capabilities missing
+src/App.tsx:272-306;src/utils/quantEngine.ts:495-675;app.py:131-138
+Observed — B/D/E allocations, rebalance costs and lot-level taxes cannot be reproduced in app.
+Acceptance — Verify cash flow, weight changes, rebalance bases and historical availability against independent manual cases.
+
+MF-021 [P1] Incorrect execution terms
+src/data/presetFunds.ts:91-111;src/utils/mfapiClassifier.ts:223-247
+Observed — An early redemption could be incorrectly evaluated as load-free. Latest effective addendum still needs checking.
+Acceptance — For matched MO rule date fixture check days 15, 16, 365 and 366 and reconcile against AMC source.
+
+Authoritative source routes
+AMFI NAV and identity  https://www.amfiindia.com/net-asset-value/nav-download
+NSE Indices official history  https://www.niftyindices.com/reports/historical-data
+PPFAS official benchmark and disclosures  https://amc.ppfas.com/downloads/digital-factsheet/2026/october-2026/
+Motilal Oswal official scheme and benchmark  https://www.motilaloswalmf.com/mutual-funds/motilal-oswal-midcap-fund
+NSE HDFC Gold ETF split circular  https://nsearchives.nseindia.com/content/circulars/CML47320.pdf
+SEBI mutual funds master circular  https://www.sebi.gov.in/legal/master-circulars/mar-2026/master-circular-for-mutual-funds_100491.html
+AMFI market-cap classifications  https://www.amfiindia.com/otherdata/categorisation-of-stocks
+AMFI liquidity disclosures  https://www.amfiindia.com/risk-parameters
+Indian Income Tax Department specified fund provisions  https://www.incometaxindia.gov.in/w/section-76-102
