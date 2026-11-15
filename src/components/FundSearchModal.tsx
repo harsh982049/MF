@@ -15,8 +15,13 @@ import {
   ShieldCheck,
   ShieldAlert,
 } from 'lucide-react';
-import { FundMeta, SchemeIdentityAudit } from '../types/quant';
-import { validateDiscoveredSchemeIdentity } from '../utils/schemeIdentity';
+import { FundMeta } from '../types/quant';
+import { parsePlanAndOption } from '../utils/schemeIdentity';
+import {
+  previewSchemeWorkflow,
+  SchemeExpectationInput,
+  SchemePreviewResult,
+} from '../utils/schemeWorkflow';
 
 interface SchemeSearchItem {
   schemeCode: number;
@@ -25,27 +30,16 @@ interface SchemeSearchItem {
   isinDivReinvestment?: string | null;
 }
 
-interface SchemeLatestMeta {
-  fund_house?: string;
-  scheme_type?: string;
-  scheme_category?: string;
-  scheme_code: number;
-  scheme_name: string;
-  isin_growth?: string | null;
-  isin_div_reinvestment?: string | null;
-  latestNav?: string;
-  latestDate?: string;
-  identity: SchemeIdentityAudit;
-  previewError?: string;
-}
-
 interface FundSearchModalProps {
   isOpen: boolean;
   onClose: () => void;
   availableFunds: Record<number, FundMeta>;
   selectedCodes: number[];
   onToggleFund: (code: number) => void;
-  onAddCustomScheme: (code: number) => Promise<{ ok: boolean; message?: string }>;
+  onAddCustomScheme: (
+    code: number,
+    expectation?: Partial<SchemeExpectationInput>
+  ) => Promise<{ ok: boolean; message?: string }>;
 }
 
 export const FundSearchModal: React.FC<FundSearchModalProps> = ({
@@ -72,9 +66,9 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
   const [addingCode, setAddingCode] = useState<number | null>(null);
   const [actionBanner, setActionBanner] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
 
-  const [previewScheme, setPreviewScheme] = useState<SchemeLatestMeta | null>(null);
+  const [previewScheme, setPreviewScheme] = useState<SchemePreviewResult | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
-  const previewCache = useRef<Record<number, SchemeLatestMeta>>({});
+  const previewCache = useRef<Record<number, SchemePreviewResult>>({});
   const searchReqSeq = useRef(0);
   const previewReqSeq = useRef(0);
 
@@ -150,68 +144,46 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
     return () => clearTimeout(timer);
   }, [searchTerm, isOpen]);
 
-  // 3. Preview Scheme with strict identity validation (NO fabricated fallback metadata)
-  const handlePreviewScheme = async (code: number, fallbackName: string) => {
-    if (previewCache.current[code]) {
-      setPreviewScheme(previewCache.current[code]);
+  const buildExpectationFromItem = (item: SchemeSearchItem): Partial<SchemeExpectationInput> => {
+    const parsed = parsePlanAndOption(item.schemeName);
+    const expectedIsin =
+      parsed.option === 'IDCW'
+        ? item.isinDivReinvestment || item.isinGrowth || null
+        : item.isinGrowth || null;
+    return {
+      requestedCode: item.schemeCode,
+      expectedName: item.schemeName,
+      expectedPlan: parsed.plan,
+      expectedOption: parsed.option,
+      expectedIsin,
+    };
+  };
+
+  // 3. Preview Scheme with shared workflow (requested code check, trusted registry & NAV cutoff/freshness)
+  const handlePreviewScheme = async (item: SchemeSearchItem) => {
+    if (previewCache.current[item.schemeCode]) {
+      setPreviewScheme(previewCache.current[item.schemeCode]);
       return;
     }
 
     const seq = ++previewReqSeq.current;
     setIsPreviewLoading(true);
     try {
-      const resp = await fetch(`https://api.mfapi.in/mf/${code}/latest`);
-      if (seq !== previewReqSeq.current) return;
-
-      if (!resp.ok) {
-        setPreviewScheme({
-          scheme_code: code,
-          scheme_name: fallbackName,
-          identity: validateDiscoveredSchemeIdentity(null),
-          previewError: `Provider preview failed (HTTP ${resp.status}).`,
-        });
-        return;
-      }
-
-      const json = await resp.json();
-      if (seq !== previewReqSeq.current) return;
-
-      const meta = json.meta || { scheme_code: code, scheme_name: fallbackName };
-      const latestPoint = json.data && json.data[0] ? json.data[0] : null;
-      const identity = validateDiscoveredSchemeIdentity({
-        scheme_code: meta.scheme_code || code,
-        scheme_name: meta.scheme_name || fallbackName,
-        isin_growth: meta.isin_growth,
-        isin_div_reinvestment: meta.isin_div_reinvestment,
-        fund_house: meta.fund_house,
-        scheme_category: meta.scheme_category,
-        scheme_type: meta.scheme_type,
+      const expectation = buildExpectationFromItem(item);
+      const schemeInfo = await previewSchemeWorkflow({
+        requestedCode: item.schemeCode,
+        expectedName: expectation.expectedName,
+        expectedPlan: expectation.expectedPlan,
+        expectedOption: expectation.expectedOption,
+        expectedIsin: expectation.expectedIsin,
       });
+      if (seq !== previewReqSeq.current) return;
 
-      const schemeInfo: SchemeLatestMeta = {
-        scheme_code: code,
-        scheme_name: meta.scheme_name || fallbackName,
-        fund_house: meta.fund_house,
-        scheme_category: meta.scheme_category,
-        scheme_type: meta.scheme_type,
-        isin_growth: meta.isin_growth || null,
-        isin_div_reinvestment: meta.isin_div_reinvestment || null,
-        latestNav: latestPoint ? latestPoint.nav : undefined,
-        latestDate: latestPoint ? latestPoint.date : undefined,
-        identity,
-      };
-
-      previewCache.current[code] = schemeInfo;
-      setPreviewScheme(schemeInfo);
-    } catch (err) {
-      if (seq === previewReqSeq.current) {
-        setPreviewScheme({
-          scheme_code: code,
-          scheme_name: fallbackName,
-          identity: validateDiscoveredSchemeIdentity(null),
-          previewError: err instanceof Error ? err.message : 'Network error loading scheme preview.',
-        });
+      // Never retain failed, mismatched, or unverified payloads in the preview cache
+      if (schemeInfo.shouldCachePreview) {
+        previewCache.current[item.schemeCode] = schemeInfo;
       }
+      setPreviewScheme(schemeInfo);
     } finally {
       if (seq === previewReqSeq.current) {
         setIsPreviewLoading(false);
@@ -219,8 +191,8 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
     }
   };
 
-  // 4. Add or Remove Fund with verified error propagation
-  const handleActionClick = async (code: number) => {
+  // 4. Add or Remove Fund with verified error propagation & full expectation passing
+  const handleActionClick = async (code: number, item?: SchemeSearchItem) => {
     if (selectedCodes.includes(code)) {
       onToggleFund(code);
       return;
@@ -229,7 +201,19 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
     setAddingCode(code);
     setActionBanner(null);
     try {
-      const outcome = await onAddCustomScheme(code);
+      const expectation = item
+        ? buildExpectationFromItem(item)
+        : previewScheme && previewScheme.scheme_code === code
+        ? {
+            requestedCode: code,
+            expectedName: previewScheme.identity.expectedName,
+            expectedPlan: previewScheme.identity.expectedPlan,
+            expectedOption: previewScheme.identity.expectedOption,
+            expectedIsin: previewScheme.identity.expectedIsin,
+          }
+        : { requestedCode: code };
+
+      const outcome = await onAddCustomScheme(code, expectation);
       if (outcome.ok) {
         setActionBanner({
           kind: 'success',
@@ -436,8 +420,8 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
               return (
                 <div
                   key={item.schemeCode}
-                  onMouseEnter={() => handlePreviewScheme(item.schemeCode, item.schemeName)}
-                  onClick={() => handlePreviewScheme(item.schemeCode, item.schemeName)}
+                  onMouseEnter={() => handlePreviewScheme(item)}
+                  onClick={() => handlePreviewScheme(item)}
                   className={`p-3 rounded-xl border transition-all flex items-center justify-between gap-3 cursor-pointer ${
                     isSelected
                       ? 'bg-slate-800/90 border-indigo-500/60 shadow-sm'
@@ -466,7 +450,7 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
 
                   <div className="shrink-0 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                     <button
-                      onClick={() => handleActionClick(item.schemeCode)}
+                      onClick={() => handleActionClick(item.schemeCode, item)}
                       disabled={isAdding}
                       className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                         isSelected
@@ -525,19 +509,19 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
                       {previewScheme.scheme_name}
                     </h3>
                     <div className="text-[11px] font-mono text-indigo-400 mt-1">
-                      AMFI Code: {previewScheme.scheme_code}
+                      Requested Code: {previewScheme.scheme_code}
                     </div>
                   </div>
 
                   {/* Identity Status Badge */}
                   <div
                     className={`p-2.5 rounded-xl border text-[11px] flex items-start gap-2 ${
-                      previewScheme.identity.verified
+                      previewScheme.accepted
                         ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
                         : 'bg-rose-950/50 border-rose-800/70 text-rose-200'
                     }`}
                   >
-                    {previewScheme.identity.verified ? (
+                    {previewScheme.accepted ? (
                       <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                     ) : (
                       <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
@@ -545,6 +529,7 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
                     <div>
                       <div className="font-bold uppercase tracking-wider text-[10px]">
                         Identity: {previewScheme.identity.status.replace(/_/g, ' ')}
+                        {previewScheme.analyticsSuppressed ? ' (Analytics Suppressed)' : ''}
                       </div>
                       <div className="text-[11px] opacity-90 mt-0.5 leading-snug">
                         {previewScheme.previewError || previewScheme.identity.reason}
@@ -552,10 +537,10 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
                     </div>
                   </div>
 
-                  {previewScheme.latestNav && (
+                  {previewScheme.accepted && previewScheme.latestNav ? (
                     <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
                       <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">
-                        Latest NAV (mfapi.in)
+                        Validated Latest NAV (mfapi.in)
                       </div>
                       <div className="flex items-baseline gap-2 mt-0.5">
                         <span className="text-xl font-mono font-bold text-emerald-400">
@@ -566,20 +551,33 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
                         </span>
                       </div>
                     </div>
+                  ) : (
+                    <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-3 text-[11px] text-amber-300">
+                      NAV &amp; research preview suppressed: scheme did not pass trusted AMFI registry &amp; NAV validation.
+                    </div>
                   )}
 
                   <div className="space-y-2 text-xs">
                     <div className="flex items-center justify-between py-1 border-b border-slate-800/60">
-                      <span className="text-slate-400">Fund House</span>
-                      <span className="font-medium text-slate-200 text-right truncate max-w-[150px]">
-                        {previewScheme.fund_house || 'Unavailable'}
+                      <span className="text-slate-400">Registry Match</span>
+                      <span className={`font-mono font-semibold ${previewScheme.identity.registryMatched ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {previewScheme.identity.registryMatched
+                          ? `AMFI #${previewScheme.identity.registrySchemeCode} (${previewScheme.identity.registryAsOfDate})`
+                          : 'Unverified / Absent'}
                       </span>
                     </div>
 
                     <div className="flex items-center justify-between py-1 border-b border-slate-800/60">
-                      <span className="text-slate-400">Category</span>
+                      <span className="text-slate-400">Fetched Code</span>
+                      <span className="font-mono text-slate-200">
+                        {previewScheme.identity.providerSchemeCode ?? 'Unavailable'}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between py-1 border-b border-slate-800/60">
+                      <span className="text-slate-400">Fund House</span>
                       <span className="font-medium text-slate-200 text-right truncate max-w-[150px]">
-                        {previewScheme.scheme_category || 'Unavailable'}
+                        {previewScheme.fund_house || 'Unavailable'}
                       </span>
                     </div>
 
@@ -591,7 +589,7 @@ export const FundSearchModal: React.FC<FundSearchModalProps> = ({
                     </div>
 
                     <div className="flex items-center justify-between py-1 border-b border-slate-800/60">
-                      <span className="text-slate-400">ISIN</span>
+                      <span className="text-slate-400">Fetched ISIN</span>
                       <span className="font-mono text-slate-300">
                         {previewScheme.identity.providerIsin || 'Unavailable'}
                       </span>

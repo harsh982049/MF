@@ -1,16 +1,18 @@
-import { FundMeta, NavPoint, ValidatedNavSeries } from '../types/quant';
+import { FundMeta, NavPoint, OptionType, PlanType, ValidatedNavSeries } from '../types/quant';
 import {
   BENCHMARKS,
   ExternalBenchmarkInput,
   isNseTradingDay,
   resolveBenchmarkSeries,
 } from './genuineBenchmarks';
-import { validateRawNavSeries } from '../utils/navValidator';
+import { getIndiaValuationDateIso, validateRawNavSeries } from '../utils/navValidator';
 import {
   AMFI_SNAPSHOT_DATE,
   AMFI_SNAPSHOT_SOURCE,
   PRESET_RECONCILIATION_TABLE,
   ProviderSchemeMeta,
+  TRUSTED_AMFI_REGISTRY,
+  TrustedRegistryEntry,
   validateDiscoveredSchemeIdentity,
   validateSchemeIdentity,
 } from '../utils/schemeIdentity';
@@ -115,7 +117,10 @@ export const PRESET_FUNDS: Record<number, FundMeta> = {
       asOfDate: '2026-09-30',
       source: 'PPFAS September 2026 Top Disclosed Equity Positions (partial coverage; exchange ADTV not ingested)',
       partialCoverage: true,
-      reason: 'Full security-level monthly disclosure & exchange 30D ADTV ingestion scheduled in Batch 5.',
+      disclosedWeightPct: 67.92,
+      unknownWeightPct: 32.08,
+      coverageThresholdPct: 95,
+      reason: 'Disclosed subset sums to 67.92% of AUM (32.08% unknown/undisclosed). Full security-level monthly disclosure & exchange 30D ADTV ingestion scheduled in Batch 5.',
     },
     holdings: [
       { isin: 'INE040A01034', name: 'HDFC Bank Ltd', sector: 'Financial Services', mcap: 'Large Cap', weight: 7.75, adtv_cr: null },
@@ -174,7 +179,10 @@ export const PRESET_FUNDS: Record<number, FundMeta> = {
       asOfDate: '2026-09-30',
       source: 'Motilal Oswal Top Disclosed Equity Positions (partial coverage; exchange ADTV not ingested)',
       partialCoverage: true,
-      reason: 'Full security-level monthly disclosure & exchange 30D ADTV ingestion scheduled in Batch 5.',
+      disclosedWeightPct: 62.7,
+      unknownWeightPct: 37.3,
+      coverageThresholdPct: 95,
+      reason: 'Disclosed subset sums to 62.70% of AUM (37.30% unknown/undisclosed). Full security-level monthly disclosure & exchange 30D ADTV ingestion scheduled in Batch 5.',
     },
     holdings: [
       { isin: 'INE982J01020', name: 'One 97 Communications (Paytm)', sector: 'Financial Services', mcap: 'Mid Cap', weight: 9.2, adtv_cr: null },
@@ -222,6 +230,9 @@ export const PRESET_FUNDS: Record<number, FundMeta> = {
       asOfDate: null,
       source: null,
       partialCoverage: false,
+      disclosedWeightPct: null,
+      unknownWeightPct: null,
+      coverageThresholdPct: 95,
       reason: PRESET_RECONCILIATION_TABLE[118989].reason,
     },
     holdings: null,
@@ -267,7 +278,10 @@ export const PRESET_FUNDS: Record<number, FundMeta> = {
       asOfDate: '2026-09-30',
       source: 'Nippon India Top Disclosed Equity Positions (partial coverage; exchange ADTV not ingested)',
       partialCoverage: true,
-      reason: 'Full security-level monthly disclosure & exchange 30D ADTV ingestion scheduled in Batch 5.',
+      disclosedWeightPct: 33.1,
+      unknownWeightPct: 66.9,
+      coverageThresholdPct: 95,
+      reason: 'Disclosed subset sums to 33.10% of AUM (66.90% unknown/undisclosed). Full security-level monthly disclosure & exchange 30D ADTV ingestion scheduled in Batch 5.',
     },
     holdings: [
       { isin: 'INE974X01010', name: 'Tube Investments of India', sector: 'Industrials', mcap: 'Mid Cap', weight: 4.1, adtv_cr: null },
@@ -326,7 +340,10 @@ export const PRESET_FUNDS: Record<number, FundMeta> = {
       asOfDate: '2026-09-30',
       source: 'SBI MF Top Disclosed Equity Positions (partial coverage; exchange ADTV not ingested)',
       partialCoverage: true,
-      reason: 'Full security-level monthly disclosure & exchange 30D ADTV ingestion scheduled in Batch 5.',
+      disclosedWeightPct: 68.0,
+      unknownWeightPct: 32.0,
+      coverageThresholdPct: 95,
+      reason: 'Disclosed subset sums to 68.00% of AUM (32.00% unknown/undisclosed). Full security-level monthly disclosure & exchange 30D ADTV ingestion scheduled in Batch 5.',
     },
     holdings: [
       { isin: 'INE040A01034', name: 'HDFC Bank Ltd', sector: 'Financial Services', mcap: 'Large Cap', weight: 9.1, adtv_cr: null },
@@ -379,6 +396,9 @@ export const PRESET_FUNDS: Record<number, FundMeta> = {
       asOfDate: null,
       source: null,
       partialCoverage: false,
+      disclosedWeightPct: null,
+      unknownWeightPct: null,
+      coverageThresholdPct: 95,
       reason: PRESET_RECONCILIATION_TABLE[120503].reason,
     },
     holdings: null,
@@ -421,6 +441,9 @@ export const PRESET_FUNDS: Record<number, FundMeta> = {
       asOfDate: null,
       source: null,
       partialCoverage: false,
+      disclosedWeightPct: null,
+      unknownWeightPct: null,
+      coverageThresholdPct: 95,
       reason: PRESET_RECONCILIATION_TABLE[120586].reason,
     },
     holdings: null,
@@ -458,6 +481,9 @@ export const PRESET_FUNDS: Record<number, FundMeta> = {
       asOfDate: null,
       source: null,
       partialCoverage: false,
+      disclosedWeightPct: null,
+      unknownWeightPct: null,
+      coverageThresholdPct: 95,
       reason: PRESET_RECONCILIATION_TABLE[118753].reason,
     },
     holdings: null,
@@ -495,6 +521,9 @@ export const PRESET_FUNDS: Record<number, FundMeta> = {
       asOfDate: null,
       source: null,
       partialCoverage: false,
+      disclosedWeightPct: null,
+      unknownWeightPct: null,
+      coverageThresholdPct: 95,
       reason: PRESET_RECONCILIATION_TABLE[145552].reason,
     },
     holdings: null,
@@ -509,31 +538,57 @@ export function getBenchmarkSeries(
 }
 
 export interface FetchLiveMfOptions {
+  requestedCode?: number;
+  expectedName?: string;
+  expectedPlan?: PlanType;
+  expectedOption?: OptionType;
+  expectedIsin?: string | null;
   referenceDate?: string;
+  valuationCutoffDate?: string;
   maxStaleDays?: number;
   expectedMeta?: FundMeta;
+  trustedRegistry?: Record<number, TrustedRegistryEntry>;
 }
 
 function buildErrorSeries(
   schemeCode: number,
   reason: string,
-  expectedMeta?: FundMeta
+  expectedMeta?: FundMeta,
+  valuationCutoffDate?: string
 ): ValidatedNavSeries {
+  const cutoffIso = valuationCutoffDate || getIndiaValuationDateIso();
+  const baseIdentity = expectedMeta?.identityStatus
+    ? {
+        ...expectedMeta.identityStatus,
+        verified: false,
+        status: 'provider_error' as const,
+        providerSchemeCode: null,
+        providerName: null,
+        providerPlan: 'Unknown' as const,
+        providerOption: 'Unknown' as const,
+        providerIsin: null,
+        providerSource: 'unavailable' as const,
+        reason,
+      }
+    : null;
+
   return {
     schemeCode,
     points: [],
     rawObservations: [],
-    identity: expectedMeta?.identityStatus ?? null,
+    identity: baseIdentity,
     validation: {
       status: 'unavailable',
       usable: false,
       provider: 'api.mfapi.in',
       fetchedAt: new Date().toISOString(),
+      valuationCutoffDate: cutoffIso,
       totalRawCount: 0,
       validCount: 0,
       rejectedInvalidDateCount: 0,
       rejectedNonPositiveCount: 0,
       rejectedNonFiniteCount: 0,
+      rejectedPostCutoffCount: 0,
       duplicateIdenticalCount: 0,
       duplicateConflicts: [],
       earliestDate: null,
@@ -544,6 +599,15 @@ function buildErrorSeries(
       quarantinedFromBreak: false,
       unavailableReason: reason,
       warnings: [reason],
+      rejectedPayloadDiagnostics: {
+        requestedSchemeCode: schemeCode,
+        returnedSchemeCode: null,
+        returnedSchemeName: null,
+        returnedIsin: null,
+        reason,
+        totalRawCount: 0,
+        sampleObservations: [],
+      },
     },
   };
 }
@@ -553,11 +617,13 @@ function buildErrorSeries(
  */
 export function validateMfapiPayload(
   schemeCode: number,
-  payload: { meta?: ProviderSchemeMeta; data?: { date: string; nav: string }[]; status?: string },
+  payload: { meta?: ProviderSchemeMeta; data?: { date: string; nav: string | number }[]; status?: string },
   options: FetchLiveMfOptions = {}
 ): ValidatedNavSeries {
+  const requestedCode = options.requestedCode ?? schemeCode;
   const providerMeta = payload?.meta;
-  const expectedMeta = options.expectedMeta ?? PRESET_FUNDS[schemeCode];
+  const expectedMeta = options.expectedMeta ?? PRESET_FUNDS[requestedCode];
+  const trustedRegistry = options.trustedRegistry ?? TRUSTED_AMFI_REGISTRY;
 
   let identity = expectedMeta
     ? validateSchemeIdentity(
@@ -568,16 +634,24 @@ export function validateMfapiPayload(
           option: expectedMeta.identityStatus.expectedOption,
           isin: expectedMeta.identityStatus.expectedIsin,
           acceptedAliases:
-            schemeCode === 119598
+            requestedCode === 119598
               ? ['SBI Bluechip Fund', 'SBI Bluechip Large Cap Fund', 'SBI Large Cap Fund']
               : [],
         },
-        providerMeta || null
+        providerMeta || null,
+        trustedRegistry
       )
-    : validateDiscoveredSchemeIdentity(providerMeta || null);
+    : validateDiscoveredSchemeIdentity(providerMeta || null, {
+        requestedCode,
+        expectedName: options.expectedName,
+        expectedPlan: options.expectedPlan,
+        expectedOption: options.expectedOption,
+        expectedIsin: options.expectedIsin,
+        trustedRegistry,
+      });
 
   // Also ensure any preset blocked in the reconciliation table remains blocked even if caller didn't pass expectedMeta
-  const rec = PRESET_RECONCILIATION_TABLE[schemeCode];
+  const rec = PRESET_RECONCILIATION_TABLE[requestedCode];
   if (rec && !rec.selectable && identity.verified) {
     identity = validateSchemeIdentity(
       {
@@ -587,23 +661,28 @@ export function validateMfapiPayload(
         option: 'Growth',
         isin: rec.auditedPresetIsin,
       },
-      providerMeta || null
+      providerMeta || null,
+      trustedRegistry
     );
   }
 
   return validateRawNavSeries(payload?.data, {
-    schemeCode,
+    schemeCode: requestedCode,
     provider: 'api.mfapi.in',
     referenceDate: options.referenceDate,
+    valuationCutoffDate: options.valuationCutoffDate,
     maxStaleDays: options.maxStaleDays ?? 14,
     identity,
+    returnedSchemeCode: providerMeta?.scheme_code != null ? Number(providerMeta.scheme_code) : null,
+    returnedSchemeName: providerMeta?.scheme_name ?? null,
+    returnedIsin: (providerMeta?.isin_growth || providerMeta?.isin_div_reinvestment || null) ?? null,
   });
 }
 
 /**
  * Fetches historical daily NAV series from mfapi.in with strict identity verification,
  * calendar-date checks, finite positive NAV filtering, duplicate conflict blocking,
- * freshness enforcement, and corporate-action break detection.
+ * India valuation cutoff, freshness enforcement, and corporate-action break detection.
  * NEVER fabricates synthetic NAV points on error or mismatch.
  */
 export async function fetchLiveMfNav(
@@ -611,6 +690,7 @@ export async function fetchLiveMfNav(
   options: FetchLiveMfOptions = {}
 ): Promise<ValidatedNavSeries> {
   const expectedMeta = options.expectedMeta ?? PRESET_FUNDS[schemeCode];
+  const cutoffIso = options.valuationCutoffDate || options.referenceDate || getIndiaValuationDateIso();
 
   // Fast-fail blocked presets while documenting exact AMFI reconciliation conflict
   const rec = PRESET_RECONCILIATION_TABLE[schemeCode];
@@ -623,7 +703,8 @@ export async function fetchLiveMfNav(
         option: 'Growth',
         isin: rec.auditedPresetIsin,
       },
-      null
+      null,
+      options.trustedRegistry ?? TRUSTED_AMFI_REGISTRY
     );
     return {
       schemeCode,
@@ -635,11 +716,13 @@ export async function fetchLiveMfNav(
         usable: false,
         provider: `AMFI Snapshot (${AMFI_SNAPSHOT_SOURCE})`,
         fetchedAt: new Date().toISOString(),
+        valuationCutoffDate: cutoffIso,
         totalRawCount: 0,
         validCount: 0,
         rejectedInvalidDateCount: 0,
         rejectedNonPositiveCount: 0,
         rejectedNonFiniteCount: 0,
+        rejectedPostCutoffCount: 0,
         duplicateIdenticalCount: 0,
         duplicateConflicts: [],
         earliestDate: null,
@@ -650,6 +733,15 @@ export async function fetchLiveMfNav(
         quarantinedFromBreak: false,
         unavailableReason: rec.reason,
         warnings: [rec.reason],
+        rejectedPayloadDiagnostics: {
+          requestedSchemeCode: schemeCode,
+          returnedSchemeCode: null,
+          returnedSchemeName: rec.amfiName,
+          returnedIsin: rec.amfiIsin,
+          reason: rec.reason,
+          totalRawCount: 0,
+          sampleObservations: [],
+        },
       },
     };
   }
@@ -675,5 +767,5 @@ export async function fetchLiveMfNav(
     }
   }
 
-  return buildErrorSeries(schemeCode, `Unavailable: ${lastError}`, expectedMeta);
+  return buildErrorSeries(schemeCode, `Unavailable: ${lastError}`, expectedMeta, cutoffIso);
 }

@@ -25,8 +25,75 @@ export interface ExpectedSchemeIdentity {
   acceptedAliases?: string[];
 }
 
+export interface TrustedRegistryEntry {
+  scheme_code: number;
+  scheme_name: string;
+  plan: PlanType;
+  option: OptionType;
+  isin: string;
+  asOfDate: string;
+  source: string;
+  acceptedAliases?: string[];
+}
+
+export interface DiscoveryValidationOptions {
+  requestedCode?: number;
+  expectedName?: string;
+  expectedPlan?: PlanType;
+  expectedOption?: OptionType;
+  expectedIsin?: string | null;
+  trustedRegistry?: Record<number, TrustedRegistryEntry>;
+}
+
 export const AMFI_SNAPSHOT_DATE = '2026-11-13';
 export const AMFI_SNAPSHOT_SOURCE = 'https://www.amfiindia.com/spages/NAVAll.txt';
+
+/**
+ * Independent trusted dated AMFI registry snapshot (13 Nov 2026) used to verify scheme identities
+ * independently of third-party mfapi.in search/series responses.
+ */
+export const TRUSTED_AMFI_REGISTRY: Record<number, TrustedRegistryEntry> = {
+  122639: {
+    scheme_code: 122639,
+    scheme_name: 'Parag Parikh Flexi Cap Fund - Direct Plan - Growth',
+    plan: 'Direct',
+    option: 'Growth',
+    isin: 'INF879O01027',
+    asOfDate: AMFI_SNAPSHOT_DATE,
+    source: AMFI_SNAPSHOT_SOURCE,
+    acceptedAliases: ['Parag Parikh Flexi Cap Fund'],
+  },
+  127042: {
+    scheme_code: 127042,
+    scheme_name: 'Motilal Oswal Midcap Fund',
+    plan: 'Direct',
+    option: 'Growth',
+    isin: 'INF247L01445',
+    asOfDate: AMFI_SNAPSHOT_DATE,
+    source: AMFI_SNAPSHOT_SOURCE,
+    acceptedAliases: ['Motilal Oswal Midcap Fund - Direct Plan - Growth'],
+  },
+  118778: {
+    scheme_code: 118778,
+    scheme_name: 'Nippon India Small Cap Fund - Direct Plan - Growth Option',
+    plan: 'Direct',
+    option: 'Growth',
+    isin: 'INF204K01K15',
+    asOfDate: AMFI_SNAPSHOT_DATE,
+    source: AMFI_SNAPSHOT_SOURCE,
+    acceptedAliases: ['Nippon India Small Cap Fund'],
+  },
+  119598: {
+    scheme_code: 119598,
+    scheme_name: 'SBI Large Cap Fund - Direct Plan - Growth',
+    plan: 'Direct',
+    option: 'Growth',
+    isin: 'INF200K01QX4',
+    asOfDate: AMFI_SNAPSHOT_DATE,
+    source: AMFI_SNAPSHOT_SOURCE,
+    acceptedAliases: ['SBI Bluechip Fund', 'SBI Bluechip Large Cap Fund', 'SBI Large Cap Fund'],
+  },
+};
 
 /**
  * Nine-preset reconciliation against the audited 13 November 2026 AMFI snapshot (Table A).
@@ -238,11 +305,74 @@ export function areSchemeNamesCompatible(
   });
 }
 
+function registryContextForCode(
+  schemeCode: number,
+  expected: ExpectedSchemeIdentity,
+  trustedRegistry: Record<number, TrustedRegistryEntry>
+) {
+  const regEntry = trustedRegistry[schemeCode];
+  const presetRec = PRESET_RECONCILIATION_TABLE[schemeCode];
+  if (regEntry) {
+    return {
+      registrySchemeCode: regEntry.scheme_code,
+      registryName: regEntry.scheme_name,
+      registryPlan: regEntry.plan,
+      registryOption: regEntry.option,
+      registryIsin: regEntry.isin,
+      registryAsOfDate: regEntry.asOfDate,
+    };
+  }
+  if (presetRec) {
+    return {
+      registrySchemeCode: presetRec.scheme_code,
+      registryName: presetRec.amfiName ?? presetRec.auditedPresetName,
+      registryPlan: presetRec.amfiPlan?.toLowerCase().includes('direct') ? ('Direct' as PlanType) : ('Unknown' as PlanType),
+      registryOption: presetRec.amfiOption?.toLowerCase().includes('growth') ? ('Growth' as OptionType) : ('Unknown' as OptionType),
+      registryIsin: presetRec.amfiIsin,
+      registryAsOfDate: presetRec.amfiDate,
+    };
+  }
+  return {
+    registrySchemeCode: null,
+    registryName: expected.name,
+    registryPlan: expected.plan,
+    registryOption: expected.option,
+    registryIsin: expected.isin,
+    registryAsOfDate: null,
+  };
+}
+
 export function validateSchemeIdentity(
   expected: ExpectedSchemeIdentity,
-  provider: ProviderSchemeMeta | null
+  provider: ProviderSchemeMeta | null,
+  trustedRegistry: Record<number, TrustedRegistryEntry> = TRUSTED_AMFI_REGISTRY
 ): SchemeIdentityAudit {
   const rec = PRESET_RECONCILIATION_TABLE[expected.scheme_code];
+  const regCtx = registryContextForCode(expected.scheme_code, expected, trustedRegistry);
+
+  // Check code mismatch BEFORE trusting any other fetched field
+  const rawProvCode = provider?.scheme_code != null ? Number(provider.scheme_code) : null;
+  if (provider && (rawProvCode === null || !Number.isFinite(rawProvCode) || rawProvCode !== expected.scheme_code)) {
+    const parsed = parsePlanAndOption(provider.scheme_name);
+    return {
+      scheme_code: expected.scheme_code,
+      verified: false,
+      status: 'code_mismatch',
+      expectedName: expected.name,
+      expectedPlan: expected.plan,
+      expectedOption: expected.option,
+      expectedIsin: expected.isin,
+      ...regCtx,
+      registryMatched: false,
+      providerSchemeCode: rawProvCode,
+      providerName: provider.scheme_name || null,
+      providerPlan: parsed.plan,
+      providerOption: parsed.option,
+      providerIsin: provider.isin_growth ? provider.isin_growth.trim().toUpperCase() : null,
+      providerSource: 'mfapi',
+      reason: `Scheme code mismatch: expected ${expected.scheme_code} (${expected.name}), fetched payload returned scheme ${provider.scheme_code} (${provider.scheme_name || 'Unknown'}).`,
+    };
+  }
 
   if (rec && !rec.selectable) {
     const blockedStatus: IdentityStatus =
@@ -264,14 +394,89 @@ export function validateSchemeIdentity(
       expectedPlan: expected.plan,
       expectedOption: expected.option,
       expectedIsin: expected.isin,
+      ...regCtx,
+      registryMatched: false,
+      providerSchemeCode: rawProvCode,
       providerName: provider?.scheme_name || rec.amfiName || null,
       providerPlan: parsedProvider.plan,
       providerOption: parsedProvider.option,
       providerIsin: provider?.isin_growth || rec.amfiIsin || null,
       providerSource: provider ? 'mfapi' : 'amfi_registry',
-      registryAsOfDate: rec.amfiDate,
       reason: rec.reason,
     };
+  }
+
+  const regEntry = trustedRegistry[expected.scheme_code];
+  if (regEntry) {
+    const parsedForReg = provider
+      ? parsePlanAndOption(provider.scheme_name)
+      : { plan: 'Unknown' as PlanType, option: 'Unknown' as OptionType };
+    const provIsinForReg = provider?.isin_growth
+      ? provider.isin_growth.trim().toUpperCase()
+      : null;
+
+    if (expected.plan !== 'Unknown' && expected.plan !== regEntry.plan) {
+      return {
+        scheme_code: expected.scheme_code,
+        verified: false,
+        status: 'plan_mismatch',
+        expectedName: expected.name,
+        expectedPlan: expected.plan,
+        expectedOption: expected.option,
+        expectedIsin: expected.isin,
+        ...regCtx,
+        registryMatched: false,
+        providerSchemeCode: rawProvCode,
+        providerName: provider?.scheme_name || null,
+        providerPlan: parsedForReg.plan,
+        providerOption: parsedForReg.option,
+        providerIsin: provIsinForReg,
+        providerSource: provider ? 'mfapi' : 'unavailable',
+        reason: `Plan mismatch on code ${expected.scheme_code}: expected ${expected.plan}, AMFI registry specifies ${regEntry.plan}.`,
+      };
+    }
+
+    if (expected.option !== 'Unknown' && expected.option !== regEntry.option) {
+      return {
+        scheme_code: expected.scheme_code,
+        verified: false,
+        status: 'plan_mismatch',
+        expectedName: expected.name,
+        expectedPlan: expected.plan,
+        expectedOption: expected.option,
+        expectedIsin: expected.isin,
+        ...regCtx,
+        registryMatched: false,
+        providerSchemeCode: rawProvCode,
+        providerName: provider?.scheme_name || null,
+        providerPlan: parsedForReg.plan,
+        providerOption: parsedForReg.option,
+        providerIsin: provIsinForReg,
+        providerSource: provider ? 'mfapi' : 'unavailable',
+        reason: `Option mismatch on code ${expected.scheme_code}: expected ${expected.option}, AMFI registry specifies ${regEntry.option}.`,
+      };
+    }
+
+    if (expected.isin && expected.isin.trim().toUpperCase() !== regEntry.isin.trim().toUpperCase()) {
+      return {
+        scheme_code: expected.scheme_code,
+        verified: false,
+        status: 'isin_mismatch',
+        expectedName: expected.name,
+        expectedPlan: expected.plan,
+        expectedOption: expected.option,
+        expectedIsin: expected.isin,
+        ...regCtx,
+        registryMatched: false,
+        providerSchemeCode: rawProvCode,
+        providerName: provider?.scheme_name || null,
+        providerPlan: parsedForReg.plan,
+        providerOption: parsedForReg.option,
+        providerIsin: provIsinForReg,
+        providerSource: provider ? 'mfapi' : 'unavailable',
+        reason: `ISIN mismatch on code ${expected.scheme_code}: expected ${expected.isin.trim().toUpperCase()}, AMFI registry specifies ${regEntry.isin}.`,
+      };
+    }
   }
 
   if (!provider) {
@@ -283,33 +488,15 @@ export function validateSchemeIdentity(
       expectedPlan: expected.plan,
       expectedOption: expected.option,
       expectedIsin: expected.isin,
+      ...regCtx,
+      registryMatched: false,
+      providerSchemeCode: null,
       providerName: null,
       providerPlan: 'Unknown',
       providerOption: 'Unknown',
       providerIsin: null,
       providerSource: 'unavailable',
-      registryAsOfDate: rec?.amfiDate || null,
       reason: `Provider metadata unavailable for scheme code ${expected.scheme_code}.`,
-    };
-  }
-
-  if (Number(provider.scheme_code) !== expected.scheme_code) {
-    const parsed = parsePlanAndOption(provider.scheme_name);
-    return {
-      scheme_code: expected.scheme_code,
-      verified: false,
-      status: 'code_mismatch',
-      expectedName: expected.name,
-      expectedPlan: expected.plan,
-      expectedOption: expected.option,
-      expectedIsin: expected.isin,
-      providerName: provider.scheme_name,
-      providerPlan: parsed.plan,
-      providerOption: parsed.option,
-      providerIsin: provider.isin_growth || null,
-      providerSource: 'mfapi',
-      registryAsOfDate: rec?.amfiDate || null,
-      reason: `Scheme code mismatch: expected ${expected.scheme_code}, received ${provider.scheme_code}.`,
     };
   }
 
@@ -329,12 +516,14 @@ export function validateSchemeIdentity(
       expectedPlan: expected.plan,
       expectedOption: expected.option,
       expectedIsin: expected.isin,
+      ...regCtx,
+      registryMatched: false,
+      providerSchemeCode: rawProvCode,
       providerName: provider.scheme_name,
       providerPlan: parsed.plan,
       providerOption: parsed.option,
       providerIsin,
       providerSource: 'mfapi',
-      registryAsOfDate: rec?.amfiDate || null,
       reason: `Scheme name mismatch on code ${expected.scheme_code}: expected "${expected.name}", provider returned "${provider.scheme_name}".`,
     };
   }
@@ -347,6 +536,9 @@ export function validateSchemeIdentity(
     parsed.option === 'Unknown' &&
     providerIsin === 'INF247L01445';
 
+  const effectiveProviderPlan: PlanType = confirmedViaAmfiHistory127042 ? 'Direct' : parsed.plan;
+  const effectiveProviderOption: OptionType = confirmedViaAmfiHistory127042 ? 'Growth' : parsed.option;
+
   if (!confirmedViaAmfiHistory127042) {
     if (expected.plan !== 'Unknown') {
       if (parsed.plan === 'Unknown') {
@@ -358,12 +550,14 @@ export function validateSchemeIdentity(
           expectedPlan: expected.plan,
           expectedOption: expected.option,
           expectedIsin: expected.isin,
+          ...regCtx,
+          registryMatched: false,
+          providerSchemeCode: rawProvCode,
           providerName: provider.scheme_name,
           providerPlan: parsed.plan,
           providerOption: parsed.option,
           providerIsin,
           providerSource: 'mfapi',
-          registryAsOfDate: rec?.amfiDate || null,
           reason: `Plan label omitted in provider name "${provider.scheme_name}". Independent verification of ${expected.plan} Plan required.`,
         };
       }
@@ -376,12 +570,14 @@ export function validateSchemeIdentity(
           expectedPlan: expected.plan,
           expectedOption: expected.option,
           expectedIsin: expected.isin,
+          ...regCtx,
+          registryMatched: false,
+          providerSchemeCode: rawProvCode,
           providerName: provider.scheme_name,
           providerPlan: parsed.plan,
           providerOption: parsed.option,
           providerIsin,
           providerSource: 'mfapi',
-          registryAsOfDate: rec?.amfiDate || null,
           reason: `Plan mismatch on code ${expected.scheme_code}: expected ${expected.plan}, provider returned ${parsed.plan}.`,
         };
       }
@@ -397,12 +593,14 @@ export function validateSchemeIdentity(
           expectedPlan: expected.plan,
           expectedOption: expected.option,
           expectedIsin: expected.isin,
+          ...regCtx,
+          registryMatched: false,
+          providerSchemeCode: rawProvCode,
           providerName: provider.scheme_name,
           providerPlan: parsed.plan,
           providerOption: parsed.option,
           providerIsin,
           providerSource: 'mfapi',
-          registryAsOfDate: rec?.amfiDate || null,
           reason: `Option label omitted in provider name "${provider.scheme_name}". Independent verification of ${expected.option} option required.`,
         };
       }
@@ -415,12 +613,14 @@ export function validateSchemeIdentity(
           expectedPlan: expected.plan,
           expectedOption: expected.option,
           expectedIsin: expected.isin,
+          ...regCtx,
+          registryMatched: false,
+          providerSchemeCode: rawProvCode,
           providerName: provider.scheme_name,
           providerPlan: parsed.plan,
           providerOption: parsed.option,
           providerIsin,
           providerSource: 'mfapi',
-          registryAsOfDate: rec?.amfiDate || null,
           reason: `Option mismatch on code ${expected.scheme_code}: expected ${expected.option}, provider returned ${parsed.option}.`,
         };
       }
@@ -436,12 +636,14 @@ export function validateSchemeIdentity(
       expectedPlan: expected.plan,
       expectedOption: expected.option,
       expectedIsin: expected.isin,
+      ...regCtx,
+      registryMatched: false,
+      providerSchemeCode: rawProvCode,
       providerName: provider.scheme_name,
-      providerPlan: confirmedViaAmfiHistory127042 ? 'Direct' : parsed.plan,
-      providerOption: confirmedViaAmfiHistory127042 ? 'Growth' : parsed.option,
+      providerPlan: effectiveProviderPlan,
+      providerOption: effectiveProviderOption,
       providerIsin,
       providerSource: 'mfapi',
-      registryAsOfDate: rec?.amfiDate || null,
       reason: `Unresolved or invalid ISIN "${providerIsin ?? 'null'}" for scheme code ${expected.scheme_code}.`,
     };
   }
@@ -455,13 +657,15 @@ export function validateSchemeIdentity(
       expectedPlan: expected.plan,
       expectedOption: expected.option,
       expectedIsin: expected.isin,
+      ...regCtx,
+      registryMatched: false,
+      providerSchemeCode: rawProvCode,
       providerName: provider.scheme_name,
-      providerPlan: confirmedViaAmfiHistory127042 ? 'Direct' : parsed.plan,
-      providerOption: confirmedViaAmfiHistory127042 ? 'Growth' : parsed.option,
+      providerPlan: effectiveProviderPlan,
+      providerOption: effectiveProviderOption,
       providerIsin,
       providerSource: 'mfapi',
-      registryAsOfDate: rec?.amfiDate || null,
-      reason: `ISIN mismatch on code ${expected.scheme_code}: expected ${expected.isin}, provider returned ${providerIsin}.`,
+      reason: `ISIN mismatch on code ${expected.scheme_code}: expected ${expected.isin}, fetched provider returned ${providerIsin}.`,
     };
   }
 
@@ -476,36 +680,88 @@ export function validateSchemeIdentity(
     expectedPlan: expected.plan,
     expectedOption: expected.option,
     expectedIsin: expected.isin,
+    ...regCtx,
+    registryMatched: Boolean(trustedRegistry[expected.scheme_code]),
+    providerSchemeCode: rawProvCode,
     providerName: provider.scheme_name,
-    providerPlan: confirmedViaAmfiHistory127042 ? 'Direct' : parsed.plan,
-    providerOption: confirmedViaAmfiHistory127042 ? 'Growth' : parsed.option,
+    providerPlan: effectiveProviderPlan,
+    providerOption: effectiveProviderOption,
     providerIsin,
     providerSource: 'mfapi',
-    registryAsOfDate: rec?.amfiDate || null,
-    reason: rec?.reason || 'Verified scheme code, name, plan, option, and ISIN against mfapi.in.',
+    reason: rec?.reason || 'Verified scheme code, name, plan, option, and ISIN against trusted AMFI registry and mfapi.in.',
   };
 }
 
-export function validateDiscoveredSchemeIdentity(provider: ProviderSchemeMeta | null): SchemeIdentityAudit {
+/**
+ * Validates a discovered scheme (from search/browse/manual code) against an independently expected code,
+ * optional expected metadata, AND a trusted dated AMFI registry snapshot.
+ * If independent registry evidence is unavailable, labels the scheme as `unverified_registry` with verified=false.
+ */
+export function validateDiscoveredSchemeIdentity(
+  provider: ProviderSchemeMeta | null,
+  options: DiscoveryValidationOptions = {}
+): SchemeIdentityAudit {
+  const requestedCode = options.requestedCode ?? (provider?.scheme_code || 0);
+  const trustedRegistry = options.trustedRegistry ?? TRUSTED_AMFI_REGISTRY;
+  const regEntry = requestedCode ? trustedRegistry[requestedCode] : undefined;
+
   if (!provider || !provider.scheme_code || !provider.scheme_name) {
     return {
-      scheme_code: provider?.scheme_code || 0,
+      scheme_code: requestedCode,
       verified: false,
       status: 'provider_error',
-      expectedName: provider?.scheme_name || 'Unknown Scheme',
-      expectedPlan: 'Unknown',
-      expectedOption: 'Unknown',
-      expectedIsin: null,
+      expectedName: options.expectedName || regEntry?.scheme_name || 'Unknown Scheme',
+      expectedPlan: options.expectedPlan || regEntry?.plan || 'Unknown',
+      expectedOption: options.expectedOption || regEntry?.option || 'Unknown',
+      expectedIsin: options.expectedIsin ?? regEntry?.isin ?? null,
+      registrySchemeCode: regEntry?.scheme_code ?? null,
+      registryName: regEntry?.scheme_name ?? null,
+      registryPlan: regEntry?.plan ?? 'Unknown',
+      registryOption: regEntry?.option ?? 'Unknown',
+      registryIsin: regEntry?.isin ?? null,
+      registryMatched: false,
+      providerSchemeCode: provider?.scheme_code != null ? Number(provider.scheme_code) : null,
       providerName: provider?.scheme_name || null,
       providerPlan: 'Unknown',
       providerOption: 'Unknown',
       providerIsin: null,
       providerSource: 'unavailable',
+      registryAsOfDate: regEntry?.asOfDate ?? null,
       reason: 'Incomplete scheme metadata returned by mfapi.in.',
     };
   }
 
-  const rec = PRESET_RECONCILIATION_TABLE[provider.scheme_code];
+  const returnedCode = Number(provider.scheme_code);
+  if (options.requestedCode !== undefined && returnedCode !== options.requestedCode) {
+    const parsedProv = parsePlanAndOption(provider.scheme_name);
+    const provIsin = (provider.isin_growth || provider.isin_div_reinvestment || null)?.trim().toUpperCase() || null;
+    return {
+      scheme_code: options.requestedCode,
+      verified: false,
+      status: 'code_mismatch',
+      expectedName: options.expectedName || regEntry?.scheme_name || `Requested Scheme ${options.requestedCode}`,
+      expectedPlan: options.expectedPlan || regEntry?.plan || 'Unknown',
+      expectedOption: options.expectedOption || regEntry?.option || 'Unknown',
+      expectedIsin: options.expectedIsin ?? regEntry?.isin ?? null,
+      registrySchemeCode: regEntry?.scheme_code ?? null,
+      registryName: regEntry?.scheme_name ?? null,
+      registryPlan: regEntry?.plan ?? 'Unknown',
+      registryOption: regEntry?.option ?? 'Unknown',
+      registryIsin: regEntry?.isin ?? null,
+      registryMatched: false,
+      providerSchemeCode: Number.isFinite(returnedCode) ? returnedCode : null,
+      providerName: provider.scheme_name,
+      providerPlan: parsedProv.plan,
+      providerOption: parsedProv.option,
+      providerIsin: provIsin,
+      providerSource: 'mfapi',
+      registryAsOfDate: regEntry?.asOfDate ?? null,
+      reason: `Scheme code mismatch: requested code ${options.requestedCode}, but provider returned code ${provider.scheme_code} (${provider.scheme_name}).`,
+    };
+  }
+
+  const targetCode = options.requestedCode ?? returnedCode;
+  const rec = PRESET_RECONCILIATION_TABLE[targetCode];
   if (rec) {
     return validateSchemeIdentity(
       {
@@ -516,10 +772,124 @@ export function validateDiscoveredSchemeIdentity(provider: ProviderSchemeMeta | 
         isin: rec.amfiIsin,
         acceptedAliases: rec.amfiName ? [rec.amfiName] : [],
       },
-      provider
+      provider,
+      trustedRegistry
     );
   }
 
+  // If the independent trusted dated registry has an entry for targetCode, validate BOTH caller expectations AND provider strictly against it
+  if (regEntry) {
+    if (
+      options.expectedPlan &&
+      options.expectedPlan !== 'Unknown' &&
+      options.expectedPlan !== regEntry.plan
+    ) {
+      const parsedProv = parsePlanAndOption(provider.scheme_name);
+      const provIsin = (provider.isin_growth || provider.isin_div_reinvestment || null)?.trim().toUpperCase() || null;
+      return {
+        scheme_code: targetCode,
+        verified: false,
+        status: 'plan_mismatch',
+        expectedName: options.expectedName || regEntry.scheme_name,
+        expectedPlan: options.expectedPlan,
+        expectedOption: options.expectedOption || regEntry.option,
+        expectedIsin: options.expectedIsin ?? regEntry.isin,
+        registrySchemeCode: regEntry.scheme_code,
+        registryName: regEntry.scheme_name,
+        registryPlan: regEntry.plan,
+        registryOption: regEntry.option,
+        registryIsin: regEntry.isin,
+        registryMatched: false,
+        providerSchemeCode: returnedCode,
+        providerName: provider.scheme_name,
+        providerPlan: parsedProv.plan,
+        providerOption: parsedProv.option,
+        providerIsin: provIsin,
+        providerSource: 'mfapi',
+        registryAsOfDate: regEntry.asOfDate,
+        reason: `Plan mismatch on code ${targetCode}: expected ${options.expectedPlan}, AMFI registry specifies ${regEntry.plan}.`,
+      };
+    }
+
+    if (
+      options.expectedOption &&
+      options.expectedOption !== 'Unknown' &&
+      options.expectedOption !== regEntry.option
+    ) {
+      const parsedProv = parsePlanAndOption(provider.scheme_name);
+      const provIsin = (provider.isin_growth || provider.isin_div_reinvestment || null)?.trim().toUpperCase() || null;
+      return {
+        scheme_code: targetCode,
+        verified: false,
+        status: 'plan_mismatch',
+        expectedName: options.expectedName || regEntry.scheme_name,
+        expectedPlan: options.expectedPlan || regEntry.plan,
+        expectedOption: options.expectedOption,
+        expectedIsin: options.expectedIsin ?? regEntry.isin,
+        registrySchemeCode: regEntry.scheme_code,
+        registryName: regEntry.scheme_name,
+        registryPlan: regEntry.plan,
+        registryOption: regEntry.option,
+        registryIsin: regEntry.isin,
+        registryMatched: false,
+        providerSchemeCode: returnedCode,
+        providerName: provider.scheme_name,
+        providerPlan: parsedProv.plan,
+        providerOption: parsedProv.option,
+        providerIsin: provIsin,
+        providerSource: 'mfapi',
+        registryAsOfDate: regEntry.asOfDate,
+        reason: `Option mismatch on code ${targetCode}: expected ${options.expectedOption}, AMFI registry specifies ${regEntry.option}.`,
+      };
+    }
+
+    if (
+      options.expectedIsin &&
+      isValidIsin(options.expectedIsin) &&
+      options.expectedIsin.trim().toUpperCase() !== regEntry.isin.trim().toUpperCase()
+    ) {
+      const parsedProv = parsePlanAndOption(provider.scheme_name);
+      const provIsin = (provider.isin_growth || provider.isin_div_reinvestment || null)?.trim().toUpperCase() || null;
+      return {
+        scheme_code: targetCode,
+        verified: false,
+        status: 'isin_mismatch',
+        expectedName: options.expectedName || regEntry.scheme_name,
+        expectedPlan: options.expectedPlan || regEntry.plan,
+        expectedOption: options.expectedOption || regEntry.option,
+        expectedIsin: options.expectedIsin.trim().toUpperCase(),
+        registrySchemeCode: regEntry.scheme_code,
+        registryName: regEntry.scheme_name,
+        registryPlan: regEntry.plan,
+        registryOption: regEntry.option,
+        registryIsin: regEntry.isin,
+        registryMatched: false,
+        providerSchemeCode: returnedCode,
+        providerName: provider.scheme_name,
+        providerPlan: parsedProv.plan,
+        providerOption: parsedProv.option,
+        providerIsin: provIsin,
+        providerSource: 'mfapi',
+        registryAsOfDate: regEntry.asOfDate,
+        reason: `ISIN mismatch on code ${targetCode}: expected ${options.expectedIsin.trim().toUpperCase()}, AMFI registry specifies ${regEntry.isin}.`,
+      };
+    }
+
+    return validateSchemeIdentity(
+      {
+        scheme_code: regEntry.scheme_code,
+        name: options.expectedName || regEntry.scheme_name,
+        plan: regEntry.plan,
+        option: regEntry.option,
+        isin: regEntry.isin,
+        acceptedAliases: [regEntry.scheme_name, ...(regEntry.acceptedAliases || [])],
+      },
+      provider,
+      trustedRegistry
+    );
+  }
+
+  // No trusted independent registry record exists: check basic structural integrity, then mark unverified_registry
   const parsed = parsePlanAndOption(provider.scheme_name);
   const rawIsin =
     parsed.option === 'IDCW'
@@ -527,55 +897,135 @@ export function validateDiscoveredSchemeIdentity(provider: ProviderSchemeMeta | 
       : provider.isin_growth || null;
   const providerIsin = rawIsin ? rawIsin.trim().toUpperCase() : null;
 
-  if (parsed.plan === 'Unknown' || parsed.option === 'Unknown') {
+  if (options.expectedPlan && options.expectedPlan !== 'Unknown' && parsed.plan !== 'Unknown' && parsed.plan !== options.expectedPlan) {
     return {
-      scheme_code: provider.scheme_code,
+      scheme_code: targetCode,
       verified: false,
-      status: 'plan_unverified',
-      expectedName: provider.scheme_name,
-      expectedPlan: parsed.plan,
-      expectedOption: parsed.option,
-      expectedIsin: providerIsin,
+      status: 'plan_mismatch',
+      expectedName: options.expectedName || provider.scheme_name,
+      expectedPlan: options.expectedPlan,
+      expectedOption: options.expectedOption || parsed.option,
+      expectedIsin: options.expectedIsin ?? null,
+      registrySchemeCode: null,
+      registryName: null,
+      registryPlan: 'Unknown',
+      registryOption: 'Unknown',
+      registryIsin: null,
+      registryMatched: false,
+      providerSchemeCode: returnedCode,
       providerName: provider.scheme_name,
       providerPlan: parsed.plan,
       providerOption: parsed.option,
       providerIsin,
       providerSource: 'mfapi',
+      registryAsOfDate: null,
+      reason: `Plan mismatch on code ${targetCode}: expected ${options.expectedPlan}, provider returned ${parsed.plan}.`,
+    };
+  }
+
+  if (parsed.plan === 'Unknown' || parsed.option === 'Unknown') {
+    return {
+      scheme_code: targetCode,
+      verified: false,
+      status: 'plan_unverified',
+      expectedName: options.expectedName || provider.scheme_name,
+      expectedPlan: options.expectedPlan || parsed.plan,
+      expectedOption: options.expectedOption || parsed.option,
+      expectedIsin: options.expectedIsin ?? providerIsin,
+      registrySchemeCode: null,
+      registryName: null,
+      registryPlan: 'Unknown',
+      registryOption: 'Unknown',
+      registryIsin: null,
+      registryMatched: false,
+      providerSchemeCode: returnedCode,
+      providerName: provider.scheme_name,
+      providerPlan: parsed.plan,
+      providerOption: parsed.option,
+      providerIsin,
+      providerSource: 'mfapi',
+      registryAsOfDate: null,
       reason: `Plan (${parsed.plan}) or option (${parsed.option}) could not be verified from scheme name "${provider.scheme_name}".`,
     };
   }
 
   if (!isValidIsin(providerIsin)) {
     return {
-      scheme_code: provider.scheme_code,
+      scheme_code: targetCode,
       verified: false,
       status: 'unresolved_isin',
-      expectedName: provider.scheme_name,
-      expectedPlan: parsed.plan,
-      expectedOption: parsed.option,
-      expectedIsin: null,
+      expectedName: options.expectedName || provider.scheme_name,
+      expectedPlan: options.expectedPlan || parsed.plan,
+      expectedOption: options.expectedOption || parsed.option,
+      expectedIsin: options.expectedIsin ?? null,
+      registrySchemeCode: null,
+      registryName: null,
+      registryPlan: 'Unknown',
+      registryOption: 'Unknown',
+      registryIsin: null,
+      registryMatched: false,
+      providerSchemeCode: returnedCode,
       providerName: provider.scheme_name,
       providerPlan: parsed.plan,
       providerOption: parsed.option,
       providerIsin,
       providerSource: 'mfapi',
-      reason: `Missing or invalid effective ISIN for scheme ${provider.scheme_code}.`,
+      registryAsOfDate: null,
+      reason: `Missing or invalid effective ISIN for scheme ${targetCode}.`,
+    };
+  }
+
+  if (
+    options.expectedIsin &&
+    isValidIsin(options.expectedIsin) &&
+    options.expectedIsin.trim().toUpperCase() !== providerIsin
+  ) {
+    return {
+      scheme_code: targetCode,
+      verified: false,
+      status: 'isin_mismatch',
+      expectedName: options.expectedName || provider.scheme_name,
+      expectedPlan: options.expectedPlan || parsed.plan,
+      expectedOption: options.expectedOption || parsed.option,
+      expectedIsin: options.expectedIsin.trim().toUpperCase(),
+      registrySchemeCode: null,
+      registryName: null,
+      registryPlan: 'Unknown',
+      registryOption: 'Unknown',
+      registryIsin: null,
+      registryMatched: false,
+      providerSchemeCode: returnedCode,
+      providerName: provider.scheme_name,
+      providerPlan: parsed.plan,
+      providerOption: parsed.option,
+      providerIsin,
+      providerSource: 'mfapi',
+      registryAsOfDate: null,
+      reason: `ISIN mismatch on code ${targetCode}: expected ${options.expectedIsin.trim().toUpperCase()}, provider returned ${providerIsin}.`,
     };
   }
 
   return {
-    scheme_code: provider.scheme_code,
-    verified: true,
-    status: 'verified',
-    expectedName: provider.scheme_name,
-    expectedPlan: parsed.plan,
-    expectedOption: parsed.option,
-    expectedIsin: providerIsin,
+    scheme_code: targetCode,
+    verified: false,
+    status: 'unverified_registry',
+    expectedName: options.expectedName || provider.scheme_name,
+    expectedPlan: options.expectedPlan || parsed.plan,
+    expectedOption: options.expectedOption || parsed.option,
+    expectedIsin: options.expectedIsin ?? providerIsin,
+    registrySchemeCode: null,
+    registryName: null,
+    registryPlan: 'Unknown',
+    registryOption: 'Unknown',
+    registryIsin: null,
+    registryMatched: false,
+    providerSchemeCode: returnedCode,
     providerName: provider.scheme_name,
     providerPlan: parsed.plan,
     providerOption: parsed.option,
     providerIsin,
     providerSource: 'mfapi',
-    reason: 'Verified scheme code, plan, option, and ISIN from mfapi.in.',
+    registryAsOfDate: null,
+    reason: `Unverified discovery: scheme ${targetCode} (${provider.scheme_name}, ISIN ${providerIsin}) has no matching record in the trusted dated AMFI registry (${AMFI_SNAPSHOT_DATE}); research analytics are suppressed.`,
   };
 }

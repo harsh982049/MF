@@ -1,7 +1,7 @@
 import {
   CorporateActionBreak,
   NavPoint,
-  NavValidationReport,
+  RejectedPayloadDiagnostics,
   RawNavObservation,
   SchemeIdentityAudit,
   ValidatedNavSeries,
@@ -16,8 +16,33 @@ export interface ValidateNavOptions {
   schemeCode?: number;
   provider?: string;
   referenceDate?: string;
+  valuationCutoffDate?: string;
   maxStaleDays?: number;
   identity?: SchemeIdentityAudit | null;
+  returnedSchemeCode?: number | null;
+  returnedSchemeName?: string | null;
+  returnedIsin?: string | null;
+}
+
+/**
+ * Returns today's calendar date (YYYY-MM-DD) in India Standard Time (Asia/Kolkata).
+ */
+export function getIndiaValuationDateIso(now: Date = new Date()): string {
+  try {
+    const formatted = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(now);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(formatted)) {
+      return formatted;
+    }
+  } catch {
+    // Fallback to explicit IST offset (+05:30) if Intl timezone formatting fails
+  }
+  const istMs = now.getTime() + 330 * 60 * 1000;
+  return new Date(istMs).toISOString().slice(0, 10);
 }
 
 export function isValidIsoCalendarDate(iso: string): boolean {
@@ -103,6 +128,45 @@ export function doesWindowSpanCorporateActionBreak(
   return null;
 }
 
+function buildSampleObservations(
+  rawItems: MfapiRawNavItem[],
+  provider: string,
+  cutoffIso: string,
+  limit: number = 5
+): RawNavObservation[] {
+  const samples: RawNavObservation[] = [];
+  for (const item of rawItems.slice(0, limit)) {
+    const rawDateStr = String(item?.date ?? '');
+    const parsedIso = parseMfapiDateToIso(rawDateStr);
+    const parsedNav =
+      typeof item?.nav === 'number'
+        ? item.nav
+        : typeof item?.nav === 'string' && item.nav.trim() !== ''
+        ? Number(item.nav.trim())
+        : NaN;
+
+    const status: RawNavObservation['status'] = !parsedIso
+      ? 'invalid_date'
+      : !Number.isFinite(parsedNav)
+      ? 'nonfinite_nav'
+      : parsedNav <= 0
+      ? 'nonpositive_nav'
+      : parsedIso > cutoffIso
+      ? 'post_cutoff_nav'
+      : 'valid';
+
+    samples.push({
+      rawDate: rawDateStr,
+      date: parsedIso,
+      rawNav: item?.nav ?? '',
+      nav: Number.isFinite(parsedNav) ? parsedNav : null,
+      source: provider,
+      status,
+    });
+  }
+  return samples;
+}
+
 export function validateRawNavSeries(
   rawItems: MfapiRawNavItem[] | null | undefined,
   options: ValidateNavOptions = {}
@@ -111,13 +175,42 @@ export function validateRawNavSeries(
   const provider = options.provider ?? 'api.mfapi.in';
   const fetchedAt = new Date().toISOString();
   const maxStaleDays = options.maxStaleDays ?? 14;
-  const refDateIso =
-    options.referenceDate && isValidIsoCalendarDate(options.referenceDate)
+  const cutoffIso =
+    options.valuationCutoffDate && isValidIsoCalendarDate(options.valuationCutoffDate)
+      ? options.valuationCutoffDate
+      : options.referenceDate && isValidIsoCalendarDate(options.referenceDate)
       ? options.referenceDate
-      : fetchedAt.slice(0, 10);
+      : getIndiaValuationDateIso();
   const identity = options.identity ?? null;
 
-  if (!rawItems || !Array.isArray(rawItems) || rawItems.length === 0) {
+  const resolvedReturnedCode =
+    options.returnedSchemeCode !== undefined
+      ? options.returnedSchemeCode
+      : identity?.providerSchemeCode ?? null;
+  const resolvedReturnedName =
+    options.returnedSchemeName !== undefined
+      ? options.returnedSchemeName
+      : identity?.providerName ?? null;
+  const resolvedReturnedIsin =
+    options.returnedIsin !== undefined
+      ? options.returnedIsin
+      : identity?.providerIsin ?? null;
+
+  // CRITICAL (MF-006): If identity failed verification, NEVER attribute rejected payload counts or dates
+  // to the requested scheme's validated coverage. Store them strictly inside rejectedPayloadDiagnostics.
+  if (identity && !identity.verified) {
+    const items = Array.isArray(rawItems) ? rawItems : [];
+    const reason = identity.reason || 'Scheme identity verification failed.';
+    const diagnostics: RejectedPayloadDiagnostics = {
+      requestedSchemeCode: schemeCode,
+      returnedSchemeCode: resolvedReturnedCode,
+      returnedSchemeName: resolvedReturnedName,
+      returnedIsin: resolvedReturnedIsin,
+      reason,
+      totalRawCount: items.length,
+      sampleObservations: buildSampleObservations(items, provider, cutoffIso, 5),
+    };
+
     return {
       schemeCode,
       points: [],
@@ -128,11 +221,13 @@ export function validateRawNavSeries(
         usable: false,
         provider,
         fetchedAt,
+        valuationCutoffDate: cutoffIso,
         totalRawCount: 0,
         validCount: 0,
         rejectedInvalidDateCount: 0,
         rejectedNonPositiveCount: 0,
         rejectedNonFiniteCount: 0,
+        rejectedPostCutoffCount: 0,
         duplicateIdenticalCount: 0,
         duplicateConflicts: [],
         earliestDate: null,
@@ -141,8 +236,51 @@ export function validateRawNavSeries(
         staleDays: null,
         corporateActionBreaks: [],
         quarantinedFromBreak: false,
-        unavailableReason: 'Empty NAV response from provider.',
+        unavailableReason: reason,
+        warnings: [reason],
+        rejectedPayloadDiagnostics: diagnostics,
+      },
+    };
+  }
+
+  if (!rawItems || !Array.isArray(rawItems) || rawItems.length === 0) {
+    const emptyReason = 'Empty NAV response from provider.';
+    return {
+      schemeCode,
+      points: [],
+      rawObservations: [],
+      identity,
+      validation: {
+        status: 'unavailable',
+        usable: false,
+        provider,
+        fetchedAt,
+        valuationCutoffDate: cutoffIso,
+        totalRawCount: 0,
+        validCount: 0,
+        rejectedInvalidDateCount: 0,
+        rejectedNonPositiveCount: 0,
+        rejectedNonFiniteCount: 0,
+        rejectedPostCutoffCount: 0,
+        duplicateIdenticalCount: 0,
+        duplicateConflicts: [],
+        earliestDate: null,
+        latestDate: null,
+        isStale: false,
+        staleDays: null,
+        corporateActionBreaks: [],
+        quarantinedFromBreak: false,
+        unavailableReason: emptyReason,
         warnings: ['Empty NAV payload received.'],
+        rejectedPayloadDiagnostics: {
+          requestedSchemeCode: schemeCode,
+          returnedSchemeCode: resolvedReturnedCode,
+          returnedSchemeName: resolvedReturnedName,
+          returnedIsin: resolvedReturnedIsin,
+          reason: emptyReason,
+          totalRawCount: 0,
+          sampleObservations: [],
+        },
       },
     };
   }
@@ -154,6 +292,7 @@ export function validateRawNavSeries(
   let rejectedInvalidDateCount = 0;
   let rejectedNonPositiveCount = 0;
   let rejectedNonFiniteCount = 0;
+  let rejectedPostCutoffCount = 0;
   let duplicateIdenticalCount = 0;
 
   for (const item of rawItems) {
@@ -201,6 +340,20 @@ export function validateRawNavSeries(
         nav: parsedNav,
         source: provider,
         status: 'nonpositive_nav',
+      });
+      continue;
+    }
+
+    // MF-008: Enforce India valuation cutoff BEFORE duplicate tracking, freshness, or return windows
+    if (parsedIso > cutoffIso) {
+      rejectedPostCutoffCount++;
+      rawObservations.push({
+        rawDate: rawDateStr,
+        date: parsedIso,
+        rawNav: item.nav,
+        nav: parsedNav,
+        source: provider,
+        status: 'post_cutoff_nav',
       });
       continue;
     }
@@ -254,6 +407,11 @@ export function validateRawNavSeries(
     .sort((a, b) => a.date.localeCompare(b.date));
 
   const warnings: string[] = [];
+  if (rejectedPostCutoffCount > 0) {
+    warnings.push(
+      `Rejected ${rejectedPostCutoffCount} post-cutoff NAV observation(s) dated after India valuation cutoff ${cutoffIso}.`
+    );
+  }
   if (rejectedInvalidDateCount > 0) {
     warnings.push(`Rejected ${rejectedInvalidDateCount} observation(s) with invalid calendar dates.`);
   }
@@ -269,6 +427,7 @@ export function validateRawNavSeries(
 
   if (duplicateConflicts.length > 0) {
     const conflictDates = duplicateConflicts.map((c) => c.date).slice(0, 3).join(', ');
+    const conflictReason = `Duplicate date conflict on ${conflictDates} (same date reported with differing NAVs).`;
     warnings.push(`Detected ${duplicateConflicts.length} conflicting duplicate NAV date(s): ${conflictDates}.`);
     return {
       schemeCode,
@@ -280,26 +439,41 @@ export function validateRawNavSeries(
         usable: false,
         provider,
         fetchedAt,
-        totalRawCount: rawItems.length,
-        validCount: sortedPoints.length,
+        valuationCutoffDate: cutoffIso,
+        totalRawCount: 0,
+        validCount: 0,
         rejectedInvalidDateCount,
         rejectedNonPositiveCount,
         rejectedNonFiniteCount,
+        rejectedPostCutoffCount,
         duplicateIdenticalCount,
         duplicateConflicts,
-        earliestDate: sortedPoints[0]?.date ?? null,
-        latestDate: sortedPoints[sortedPoints.length - 1]?.date ?? null,
+        earliestDate: null,
+        latestDate: null,
         isStale: false,
         staleDays: null,
         corporateActionBreaks: [],
         quarantinedFromBreak: false,
-        unavailableReason: `Duplicate date conflict on ${conflictDates} (same date reported with differing NAVs).`,
+        unavailableReason: conflictReason,
         warnings,
+        rejectedPayloadDiagnostics: {
+          requestedSchemeCode: schemeCode,
+          returnedSchemeCode: resolvedReturnedCode,
+          returnedSchemeName: resolvedReturnedName,
+          returnedIsin: resolvedReturnedIsin,
+          reason: conflictReason,
+          totalRawCount: rawItems.length,
+          sampleObservations: rawObservations.slice(0, 5),
+        },
       },
     };
   }
 
   if (sortedPoints.length === 0) {
+    const noValidReason =
+      rejectedPostCutoffCount > 0
+        ? `Rejected ${rejectedPostCutoffCount} post-cutoff NAV observation(s) dated after ${cutoffIso}; no valid observations remained.`
+        : 'No valid finite positive NAV observations remained after validation.';
     return {
       schemeCode,
       points: [],
@@ -310,11 +484,13 @@ export function validateRawNavSeries(
         usable: false,
         provider,
         fetchedAt,
+        valuationCutoffDate: cutoffIso,
         totalRawCount: rawItems.length,
         validCount: 0,
         rejectedInvalidDateCount,
         rejectedNonPositiveCount,
         rejectedNonFiniteCount,
+        rejectedPostCutoffCount,
         duplicateIdenticalCount,
         duplicateConflicts: [],
         earliestDate: null,
@@ -323,63 +499,31 @@ export function validateRawNavSeries(
         staleDays: null,
         corporateActionBreaks: [],
         quarantinedFromBreak: false,
-        unavailableReason: 'No valid finite positive NAV observations remained after validation.',
+        unavailableReason: noValidReason,
         warnings,
+        rejectedPayloadDiagnostics: {
+          requestedSchemeCode: schemeCode,
+          returnedSchemeCode: resolvedReturnedCode,
+          returnedSchemeName: resolvedReturnedName,
+          returnedIsin: resolvedReturnedIsin,
+          reason: noValidReason,
+          totalRawCount: rawItems.length,
+          sampleObservations: rawObservations.slice(0, 5),
+        },
       },
     };
   }
 
   const earliestDate = sortedPoints[0].date;
   const latestDate = sortedPoints[sortedPoints.length - 1].date;
-  const refMs = Date.parse(`${refDateIso}T00:00:00Z`);
+  const refMs = Date.parse(`${cutoffIso}T00:00:00Z`);
   const latestMs = Date.parse(`${latestDate}T00:00:00Z`);
   const staleDays = Math.round((refMs - latestMs) / 86400000);
   const isStale = staleDays > maxStaleDays;
 
   if (isStale) {
-    warnings.push(
-      `Stale NAV series: latest observation ${latestDate} is ${staleDays} days behind reference date ${refDateIso} (max allowed ${maxStaleDays} days).`
-    );
-  }
-
-  const corporateActionBreaks = detectCorporateActionBreaks(sortedPoints);
-  const quarantinedFromBreak = corporateActionBreaks.length > 0;
-  for (const brk of corporateActionBreaks) {
-    warnings.push(brk.explanation);
-  }
-
-  // If identity failed verification, the series must not be used as verified scheme analytics
-  if (identity && !identity.verified) {
-    return {
-      schemeCode,
-      points: [],
-      rawObservations,
-      identity,
-      validation: {
-        status: 'unavailable',
-        usable: false,
-        provider,
-        fetchedAt,
-        totalRawCount: rawItems.length,
-        validCount: sortedPoints.length,
-        rejectedInvalidDateCount,
-        rejectedNonPositiveCount,
-        rejectedNonFiniteCount,
-        duplicateIdenticalCount,
-        duplicateConflicts: [],
-        earliestDate,
-        latestDate,
-        isStale,
-        staleDays,
-        corporateActionBreaks,
-        quarantinedFromBreak,
-        unavailableReason: identity.reason || 'Scheme identity verification failed.',
-        warnings,
-      },
-    };
-  }
-
-  if (isStale) {
+    const staleReason = `Stale NAV series: latest on-or-before-cutoff observation ${latestDate} is ${staleDays} days behind cutoff ${cutoffIso} (threshold: ${maxStaleDays} days).`;
+    warnings.push(staleReason);
     return {
       schemeCode,
       points: [],
@@ -390,23 +534,40 @@ export function validateRawNavSeries(
         usable: false,
         provider,
         fetchedAt,
-        totalRawCount: rawItems.length,
-        validCount: sortedPoints.length,
+        valuationCutoffDate: cutoffIso,
+        totalRawCount: 0,
+        validCount: 0,
         rejectedInvalidDateCount,
         rejectedNonPositiveCount,
         rejectedNonFiniteCount,
+        rejectedPostCutoffCount,
         duplicateIdenticalCount,
         duplicateConflicts: [],
-        earliestDate,
-        latestDate,
+        earliestDate: null,
+        latestDate: null,
         isStale: true,
         staleDays,
-        corporateActionBreaks,
-        quarantinedFromBreak,
-        unavailableReason: `Stale NAV series: latest observation ${latestDate} is ${staleDays} days old (threshold: ${maxStaleDays} days).`,
+        corporateActionBreaks: [],
+        quarantinedFromBreak: false,
+        unavailableReason: staleReason,
         warnings,
+        rejectedPayloadDiagnostics: {
+          requestedSchemeCode: schemeCode,
+          returnedSchemeCode: resolvedReturnedCode,
+          returnedSchemeName: resolvedReturnedName,
+          returnedIsin: resolvedReturnedIsin,
+          reason: `${staleReason} (Rejected series span: ${earliestDate} to ${latestDate}, ${sortedPoints.length} valid pre-cutoff obs.)`,
+          totalRawCount: rawItems.length,
+          sampleObservations: buildSampleObservations(rawItems, provider, cutoffIso, 5),
+        },
       },
     };
+  }
+
+  const corporateActionBreaks = detectCorporateActionBreaks(sortedPoints);
+  const quarantinedFromBreak = corporateActionBreaks.length > 0;
+  for (const brk of corporateActionBreaks) {
+    warnings.push(brk.explanation);
   }
 
   return {
@@ -419,11 +580,13 @@ export function validateRawNavSeries(
       usable: true,
       provider,
       fetchedAt,
+      valuationCutoffDate: cutoffIso,
       totalRawCount: rawItems.length,
       validCount: sortedPoints.length,
       rejectedInvalidDateCount,
       rejectedNonPositiveCount,
       rejectedNonFiniteCount,
+      rejectedPostCutoffCount,
       duplicateIdenticalCount,
       duplicateConflicts: [],
       earliestDate,
@@ -434,6 +597,8 @@ export function validateRawNavSeries(
       quarantinedFromBreak,
       unavailableReason: null,
       warnings,
+      rejectedPayloadDiagnostics: null,
     },
   };
 }
+

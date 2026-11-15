@@ -5,10 +5,18 @@ import {
   FundMeta,
   NavPoint,
   NavValidationReport,
+  OverlapMatrixResult,
   RiskMetrics,
+  SchemeIdentityAudit,
   TrailingCagrResult,
 } from '../types/quant';
-import { computeRollingReturns, computeBenchmarkHitRate } from '../utils/quantEngine';
+import {
+  computeHoldingsCoverage,
+  computeRollingReturns,
+  computeBenchmarkHitRate,
+  FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT,
+} from '../utils/quantEngine';
+import { getIndiaValuationDateIso } from '../utils/navValidator';
 import { AMFI_SNAPSHOT_DATE } from '../utils/schemeIdentity';
 
 export interface ExportBuilderInput {
@@ -17,6 +25,8 @@ export interface ExportBuilderInput {
   trailingMetaMap: Record<number, TrailingCagrResult>;
   seriesMap: Record<number, NavPoint[]>;
   validationMap: Record<number, NavValidationReport | undefined>;
+  identityMap?: Record<number, SchemeIdentityAudit | undefined>;
+  holdingsOverlap?: OverlapMatrixResult;
   benchmarkStatus: BenchmarkStatus;
   rfRate: number;
   exportTimestamp?: string;
@@ -39,6 +49,81 @@ const csvNum = (value: number | null | undefined, suffix: string = ''): string =
   if (value === null || value === undefined || !Number.isFinite(value)) return '"Unavailable"';
   return suffix ? `"${value}${suffix}"` : String(value);
 };
+
+interface EffectiveExportFundState {
+  effectiveIdentity: SchemeIdentityAudit;
+  usable: boolean;
+  failureReason: string | null;
+  effectiveSeries: NavPoint[];
+  validCount: number;
+  earliestDate: string | null;
+  latestDate: string | null;
+  valuationCutoffDate: string;
+  rejectedPostCutoffCount: number;
+}
+
+function resolveEffectiveFundState(
+  fund: FundMeta,
+  valReport: NavValidationReport | undefined,
+  runtimeIdentity: SchemeIdentityAudit | undefined,
+  rawSeries: NavPoint[]
+): EffectiveExportFundState {
+  const baseIdentity = runtimeIdentity ?? fund.identityStatus;
+  const cutoffDate = valReport?.valuationCutoffDate || getIndiaValuationDateIso();
+  const rejectedPostCutoffCount = valReport?.rejectedPostCutoffCount ?? 0;
+
+  let effectiveIdentity: SchemeIdentityAudit = baseIdentity;
+  if (
+    valReport &&
+    !valReport.usable &&
+    valReport.status === 'stale' &&
+    effectiveIdentity.verified
+  ) {
+    effectiveIdentity = {
+      ...baseIdentity,
+      verified: false,
+      status: 'stale',
+      reason: valReport.unavailableReason || baseIdentity.reason,
+    };
+  } else if (
+    valReport?.rejectedPayloadDiagnostics &&
+    effectiveIdentity.verified &&
+    !valReport.usable
+  ) {
+    const diag = valReport.rejectedPayloadDiagnostics;
+    const isCodeMismatch =
+      diag.returnedSchemeCode !== null && diag.returnedSchemeCode !== fund.scheme_code;
+    effectiveIdentity = {
+      ...baseIdentity,
+      verified: false,
+      status: isCodeMismatch ? 'code_mismatch' : 'provider_error',
+      registryMatched: false,
+      providerSchemeCode: diag.returnedSchemeCode,
+      providerName: diag.returnedSchemeName,
+      providerIsin: diag.returnedIsin,
+      reason: diag.reason,
+    };
+  }
+
+  const usable = Boolean(effectiveIdentity.verified && valReport?.usable);
+  const failureReason = !usable
+    ? valReport?.unavailableReason ||
+      effectiveIdentity.reason ||
+      'Validated NAV series unavailable.'
+    : null;
+
+  return {
+    effectiveIdentity,
+    usable,
+    failureReason,
+    effectiveSeries: usable ? rawSeries : [],
+    validCount: usable ? valReport?.validCount ?? rawSeries.length : 0,
+    earliestDate: usable ? valReport?.earliestDate ?? null : null,
+    latestDate: usable ? valReport?.latestDate ?? null : null,
+    valuationCutoffDate: cutoffDate,
+    rejectedPostCutoffCount,
+  };
+}
 
 const getRollingAnalyticsForFund = (
   series: NavPoint[],
@@ -76,6 +161,7 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
     trailingMetaMap,
     seriesMap,
     validationMap,
+    identityMap,
     benchmarkStatus,
     rfRate,
     exportTimestamp = new Date().toISOString(),
@@ -94,13 +180,28 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
   const headers = [
     'Scheme Code',
     'Scheme Name',
-    'Identity Status',
-    'Identity Reason',
+    'Registry Scheme Code',
+    'Registry Name',
+    'Registry ISIN',
+    'Registry Matched',
+    'Fetched Scheme Code',
+    'Fetched Name',
+    'Fetched ISIN',
+    'Effective Identity Status',
+    'Failure / Identity Reason',
     'NAV Validation Status',
+    'Valuation Cutoff Date',
+    'Rejected Post-Cutoff Count',
+    'Rejected Payload Returned Code',
+    'Rejected Payload Obs Count',
+    'Rejected Payload Reason',
     'Corporate Action Quarantine',
     'Validated Window Start',
     'Validated Window End',
     'NAV Observations',
+    'Holdings Coverage Status',
+    'Holdings Disclosed (%)',
+    'Holdings Unknown (%)',
     'ISIN',
     'Plan',
     'Option',
@@ -176,15 +277,29 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
   ];
 
   const rows = selectedFunds.map((fund) => {
-    const rm = riskMetrics.find((r) => r.schemeCode === fund.scheme_code);
     const valReport = validationMap[fund.scheme_code];
-    const cagr = trailingMetaMap[fund.scheme_code]?.values || {};
-    const series = seriesMap[fund.scheme_code] || [];
+    const eff = resolveEffectiveFundState(
+      fund,
+      valReport,
+      identityMap?.[fund.scheme_code],
+      seriesMap[fund.scheme_code] || []
+    );
+    const rm = eff.usable ? riskMetrics.find((r) => r.schemeCode === fund.scheme_code) : undefined;
+    const cagr = eff.usable ? trailingMetaMap[fund.scheme_code]?.values || {} : {};
     const { r1, r3, r5, r7, hit1, hit3, hit5, hit7 } = getRollingAnalyticsForFund(
-      series,
+      eff.effectiveSeries,
       valReport,
       benchmarkStatus
     );
+
+    const hCov = computeHoldingsCoverage(fund.holdings, fund.holdingsStatus.partialCoverage);
+    const holdingsCovLabel = !hCov.hasHoldings
+      ? 'unavailable'
+      : hCov.isComplete
+      ? 'complete'
+      : 'partial_subset';
+
+    const diag = valReport?.rejectedPayloadDiagnostics ?? null;
 
     const rollCells = (dist: typeof r1, hit: number | null) =>
       dist.available && dist.count > 0
@@ -214,17 +329,32 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
     return [
       fund.scheme_code,
       csvText(fund.name),
-      csvText(fund.identityStatus.status),
-      csvText(fund.identityStatus.reason || 'Verified'),
+      eff.effectiveIdentity.registrySchemeCode ?? '"Unavailable"',
+      csvText(eff.effectiveIdentity.registryName),
+      csvText(eff.effectiveIdentity.registryIsin),
+      csvText(eff.effectiveIdentity.registryMatched ? 'Yes' : 'No'),
+      eff.effectiveIdentity.providerSchemeCode ?? '"Unavailable"',
+      csvText(eff.effectiveIdentity.providerName),
+      csvText(eff.effectiveIdentity.providerIsin),
+      csvText(eff.effectiveIdentity.status),
+      csvText(eff.failureReason || eff.effectiveIdentity.reason || 'Verified'),
       csvText(valReport?.status || 'unavailable'),
+      csvText(eff.valuationCutoffDate),
+      eff.rejectedPostCutoffCount,
+      diag?.returnedSchemeCode ?? '"None"',
+      diag ? diag.totalRawCount : 0,
+      csvText(diag?.reason ?? 'None'),
       csvText(
-        valReport?.quarantinedFromBreak
+        eff.usable && valReport?.quarantinedFromBreak
           ? valReport.corporateActionBreaks.map((b) => `${b.date} (${b.pctChange}%)`).join('; ')
           : 'None'
       ),
-      csvText(valReport?.earliestDate ?? null),
-      csvText(valReport?.latestDate ?? null),
-      valReport?.validCount ?? 0,
+      csvText(eff.earliestDate),
+      csvText(eff.latestDate),
+      eff.validCount,
+      csvText(holdingsCovLabel),
+      hCov.hasHoldings ? hCov.disclosedWeightPct : '"Unavailable"',
+      hCov.hasHoldings ? hCov.unknownWeightPct : '"Unavailable"',
       csvText(fund.isin),
       csvText(fund.plan),
       csvText(fund.option),
@@ -278,6 +408,8 @@ export function buildComparisonJsonPayload(input: ExportBuilderInput) {
     trailingMetaMap,
     seriesMap,
     validationMap,
+    identityMap,
+    holdingsOverlap,
     benchmarkStatus,
     rfRate,
     exportTimestamp = new Date().toISOString(),
@@ -299,21 +431,53 @@ export function buildComparisonJsonPayload(input: ExportBuilderInput) {
         asOfDate: benchmarkStatus.asOfDate,
         reason: benchmarkStatus.reason,
       },
+      holdingsOverlap: holdingsOverlap ?? null,
     },
     funds: selectedFunds.map((fund) => {
-      const rm = riskMetrics.find((r) => r.schemeCode === fund.scheme_code) || null;
       const valReport = validationMap[fund.scheme_code] || null;
-      const cagrMeta = trailingMetaMap[fund.scheme_code] || { values: {}, unavailableReasons: {} };
-      const series = seriesMap[fund.scheme_code] || [];
+      const eff = resolveEffectiveFundState(
+        fund,
+        valReport ?? undefined,
+        identityMap?.[fund.scheme_code],
+        seriesMap[fund.scheme_code] || []
+      );
+      const rm = eff.usable ? riskMetrics.find((r) => r.schemeCode === fund.scheme_code) || null : null;
+      const cagrMeta = eff.usable
+        ? trailingMetaMap[fund.scheme_code] || { values: {}, unavailableReasons: {} }
+        : {
+            values: {},
+            unavailableReasons: {
+              all: eff.failureReason || 'Scheme validation failed; metrics suppressed.',
+            },
+          };
       const { r1, r3, r5, r7, hit1, hit3, hit5, hit7 } = getRollingAnalyticsForFund(
-        series,
+        eff.effectiveSeries,
         valReport ?? undefined,
         benchmarkStatus
       );
+      const hCov = computeHoldingsCoverage(fund.holdings, fund.holdingsStatus.partialCoverage);
 
       return {
         meta: fund,
-        navValidation: valReport,
+        effectiveIdentity: eff.effectiveIdentity,
+        usable: eff.usable,
+        failureReason: eff.failureReason,
+        navValidation: valReport
+          ? {
+              ...valReport,
+              validCount: eff.validCount,
+              earliestDate: eff.earliestDate,
+              latestDate: eff.latestDate,
+            }
+          : null,
+        holdingsCoverage: {
+          available: hCov.hasHoldings,
+          partialCoverage: hCov.hasHoldings && !hCov.isComplete,
+          disclosedWeightPct: hCov.hasHoldings ? hCov.disclosedWeightPct : null,
+          unknownWeightPct: hCov.hasHoldings ? hCov.unknownWeightPct : null,
+          thresholdPct: FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT,
+          exactFullPortfolioAnalyticsAllowed: hCov.isComplete,
+        },
         trailingReturns: cagrMeta.values,
         trailingUnavailableReasons: cagrMeta.unavailableReasons,
         riskMetrics: rm,
@@ -338,21 +502,44 @@ export function buildSingleFundFactsheetCsv(
     trailingMetaMap,
     seriesMap,
     validationMap,
+    identityMap,
     benchmarkStatus,
     rfRate,
     exportTimestamp = new Date().toISOString(),
   } = input;
 
-  const rm = riskMetrics.find((r) => r.schemeCode === fund.scheme_code);
   const valReport = validationMap[fund.scheme_code];
-  const cagrMeta = trailingMetaMap[fund.scheme_code] || { values: {}, unavailableReasons: {} };
+  const eff = resolveEffectiveFundState(
+    fund,
+    valReport,
+    identityMap?.[fund.scheme_code],
+    seriesMap[fund.scheme_code] || []
+  );
+
+  const rm = eff.usable ? riskMetrics.find((r) => r.schemeCode === fund.scheme_code) : undefined;
+  const cagrMeta = eff.usable
+    ? trailingMetaMap[fund.scheme_code] || { values: {}, unavailableReasons: {} }
+    : {
+        values: {},
+        unavailableReasons: {
+          '3M': eff.failureReason || 'Unavailable',
+          '6M': eff.failureReason || 'Unavailable',
+          '1Y': eff.failureReason || 'Unavailable',
+          '3Y': eff.failureReason || 'Unavailable',
+          '5Y': eff.failureReason || 'Unavailable',
+          '7Y': eff.failureReason || 'Unavailable',
+          '10Y': eff.failureReason || 'Unavailable',
+        },
+      };
   const cagr = cagrMeta.values;
-  const series = seriesMap[fund.scheme_code] || [];
   const { r1, r3, r5, r7, hit1, hit3, hit5, hit7 } = getRollingAnalyticsForFund(
-    series,
+    eff.effectiveSeries,
     valReport,
     benchmarkStatus
   );
+
+  const hCov = computeHoldingsCoverage(fund.holdings, fund.holdingsStatus.partialCoverage);
+  const diag = valReport?.rejectedPayloadDiagnostics ?? null;
 
   const fmtRollRow = (label: string, r: typeof r1, hit: number | null) =>
     [
@@ -366,13 +553,13 @@ export function buildSingleFundFactsheetCsv(
       r.available && r.count > 0 ? csvNum(r.std) : '"Unavailable"',
       r.available && r.count > 0 ? csvNum(r.pctPositive, '%') : '"Unavailable"',
       csvNum(hit, '%'),
-      csvText(r.unavailableReason || (hit === null ? benchmarkStatus.reason || 'Unavailable' : 'OK')),
+      csvText(eff.failureReason || r.unavailableReason || (hit === null ? benchmarkStatus.reason || 'Unavailable' : 'OK')),
     ].join(',');
 
   const lines: string[] = [
     `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio`,
     `# NAV Feed Source: api.mfapi.in/mf/${fund.scheme_code} (Status: ${valReport?.status || 'unavailable'})`,
-    `# AMFI Identity Reconciliation: ${fund.identityStatus.status} (${AMFI_SNAPSHOT_DATE})`,
+    `# AMFI Identity Reconciliation: ${eff.effectiveIdentity.status} (${AMFI_SNAPSHOT_DATE})`,
     `# Benchmark Status: ${benchmarkStatus.name} | Variant: ${benchmarkStatus.variant} | Available: ${benchmarkStatus.available}`,
     `# Risk-Free Rate Applied: ${rfRate.toFixed(2)}%`,
     `# Disclosure Source: ${fund.disclosureSource || 'Unavailable'}`,
@@ -381,12 +568,26 @@ export function buildSingleFundFactsheetCsv(
     `"FUND FACTSHEET & QUANTITATIVE DOSSIER"`,
     `"Scheme Name",${csvText(fund.name)}`,
     `"Scheme Code",${fund.scheme_code}`,
+    `"Registry Scheme Code",${eff.effectiveIdentity.registrySchemeCode ?? '"Unavailable"'}`,
+    `"Registry Name",${csvText(eff.effectiveIdentity.registryName)}`,
+    `"Registry ISIN",${csvText(eff.effectiveIdentity.registryIsin)}`,
+    `"Registry Matched",${csvText(eff.effectiveIdentity.registryMatched ? 'Yes' : 'No')}`,
+    `"Fetched Scheme Code",${eff.effectiveIdentity.providerSchemeCode ?? '"Unavailable"'}`,
+    `"Fetched Scheme Name",${csvText(eff.effectiveIdentity.providerName)}`,
+    `"Fetched ISIN",${csvText(eff.effectiveIdentity.providerIsin)}`,
     `"ISIN",${csvText(fund.isin)}`,
     `"Plan / Option",${csvText(`${fund.plan} / ${fund.option}`)}`,
-    `"Identity Status",${csvText(fund.identityStatus.status)}`,
-    `"Identity Audit Reason",${csvText(fund.identityStatus.reason)}`,
+    `"Effective Identity Status",${csvText(eff.effectiveIdentity.status)}`,
+    `"Identity / Failure Reason",${csvText(eff.failureReason || eff.effectiveIdentity.reason)}`,
     `"NAV Validation Status",${csvText(valReport?.status || 'unavailable')}`,
-    `"NAV Validation Window",${csvText(valReport?.earliestDate && valReport?.latestDate ? `${valReport.earliestDate} to ${valReport.latestDate}` : null)}`,
+    `"Valuation Cutoff Date",${csvText(eff.valuationCutoffDate)}`,
+    `"Rejected Post-Cutoff Count",${eff.rejectedPostCutoffCount}`,
+    `"NAV Validation Window",${csvText(eff.earliestDate && eff.latestDate ? `${eff.earliestDate} to ${eff.latestDate}` : null)}`,
+    `"Validated NAV Observations",${eff.validCount}`,
+    `"Rejected Payload Diagnostics",${csvText(diag ? `Requested ${diag.requestedSchemeCode}, Returned ${diag.returnedSchemeCode ?? 'null'} (${diag.totalRawCount} raw obs): ${diag.reason}` : 'None')}`,
+    `"Holdings Coverage Status",${csvText(!hCov.hasHoldings ? 'Unavailable' : hCov.isComplete ? 'Complete (>=95%)' : 'Partial Subset (<95% exact overlap suppressed)')}`,
+    `"Holdings Disclosed (%)",${hCov.hasHoldings ? hCov.disclosedWeightPct : '"Unavailable"'}`,
+    `"Holdings Unknown (%)",${hCov.hasHoldings ? hCov.unknownWeightPct : '"Unavailable"'}`,
     `"Category",${csvText(fund.category)}`,
     `"Asset Class",${csvText(fund.asset_class)}`,
     `"Fund House",${csvText(fund.fund_house)}`,
@@ -417,19 +618,19 @@ export function buildSingleFundFactsheetCsv(
     ``,
     `"RISK RATIOS & ACTIVE METRICS (Rf=${rfRate.toFixed(2)}%)"`,
     `"Metric","Value","Note"`,
-    `"Annualized Volatility (%)",${csvNum(rm?.volatility)},${csvText(rm?.unavailableReasons?.fundOnly || rm?.unavailableReasons?.corporateAction || 'OK')}`,
-    `"Sharpe Ratio",${csvNum(rm?.sharpe)},${csvText(rm?.unavailableReasons?.sharpe || 'OK')}`,
-    `"Sortino Ratio",${csvNum(rm?.sortino)},${csvText(rm?.unavailableReasons?.sortino || 'OK')}`,
-    `"Beta",${csvNum(rm?.beta)},${csvText(rm?.unavailableReasons?.beta || rm?.unavailableReasons?.benchmark || 'OK')}`,
-    `"Jensen's Alpha (%)",${csvNum(rm?.jensensAlpha)},${csvText(rm?.unavailableReasons?.jensensAlpha || rm?.unavailableReasons?.benchmark || 'OK')}`,
-    `"R-Squared",${csvNum(rm?.rSquared)},${csvText(rm?.unavailableReasons?.rSquared || rm?.unavailableReasons?.benchmark || 'OK')}`,
-    `"Tracking Error (%)",${csvNum(rm?.trackingError)},${csvText(rm?.unavailableReasons?.benchmark || 'OK')}`,
-    `"Information Ratio",${csvNum(rm?.informationRatio)},${csvText(rm?.unavailableReasons?.informationRatio || rm?.unavailableReasons?.benchmark || 'OK')}`,
-    `"Maximum Drawdown (%)",${csvNum(rm?.maxDrawdown)},${csvText(rm?.unavailableReasons?.fundOnly || rm?.unavailableReasons?.corporateAction || 'OK')}`,
-    `"Recovery Period (Days)",${csvNum(rm?.recoveryDays)},${csvText(rm?.recoveryDays == null ? (rm?.unavailableReasons?.fundOnly || rm?.unavailableReasons?.corporateAction || 'Unavailable') : 'OK')}`,
-    `"Calmar Ratio",${csvNum(rm?.calmarRatio)},${csvText(rm?.unavailableReasons?.calmarRatio || 'OK')}`,
-    `"Upside Capture (%)",${csvNum(rm?.upsideCapture)},${csvText(rm?.unavailableReasons?.upsideCapture || rm?.unavailableReasons?.benchmark || 'OK')}`,
-    `"Downside Capture (%)",${csvNum(rm?.downsideCapture)},${csvText(rm?.unavailableReasons?.downsideCapture || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Annualized Volatility (%)",${csvNum(rm?.volatility)},${csvText(eff.failureReason || rm?.unavailableReasons?.fundOnly || rm?.unavailableReasons?.corporateAction || 'OK')}`,
+    `"Sharpe Ratio",${csvNum(rm?.sharpe)},${csvText(eff.failureReason || rm?.unavailableReasons?.sharpe || 'OK')}`,
+    `"Sortino Ratio",${csvNum(rm?.sortino)},${csvText(eff.failureReason || rm?.unavailableReasons?.sortino || 'OK')}`,
+    `"Beta",${csvNum(rm?.beta)},${csvText(eff.failureReason || rm?.unavailableReasons?.beta || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Jensen's Alpha (%)",${csvNum(rm?.jensensAlpha)},${csvText(eff.failureReason || rm?.unavailableReasons?.jensensAlpha || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"R-Squared",${csvNum(rm?.rSquared)},${csvText(eff.failureReason || rm?.unavailableReasons?.rSquared || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Tracking Error (%)",${csvNum(rm?.trackingError)},${csvText(eff.failureReason || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Information Ratio",${csvNum(rm?.informationRatio)},${csvText(eff.failureReason || rm?.unavailableReasons?.informationRatio || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Maximum Drawdown (%)",${csvNum(rm?.maxDrawdown)},${csvText(eff.failureReason || rm?.unavailableReasons?.fundOnly || rm?.unavailableReasons?.corporateAction || 'OK')}`,
+    `"Recovery Period (Days)",${csvNum(rm?.recoveryDays)},${csvText(eff.failureReason || (rm?.recoveryDays == null ? rm?.unavailableReasons?.fundOnly || rm?.unavailableReasons?.corporateAction || 'Unavailable' : 'OK'))}`,
+    `"Calmar Ratio",${csvNum(rm?.calmarRatio)},${csvText(eff.failureReason || rm?.unavailableReasons?.calmarRatio || 'OK')}`,
+    `"Upside Capture (%)",${csvNum(rm?.upsideCapture)},${csvText(eff.failureReason || rm?.unavailableReasons?.upsideCapture || rm?.unavailableReasons?.benchmark || 'OK')}`,
+    `"Downside Capture (%)",${csvNum(rm?.downsideCapture)},${csvText(eff.failureReason || rm?.unavailableReasons?.downsideCapture || rm?.unavailableReasons?.benchmark || 'OK')}`,
     ``,
     `"PORTFOLIO HOLDINGS & LIQUIDITY"`,
     `"ISIN","Security Name","Sector","Market Cap","Weight (%)","30D ADTV (Cr INR)"`,
@@ -463,23 +664,49 @@ export function buildRawNavCsv(input: ExportBuilderInput): string {
   const {
     selectedFunds,
     seriesMap,
+    validationMap,
+    identityMap,
     benchmarkStatus,
     exportTimestamp = new Date().toISOString(),
   } = input;
 
+  const effectiveStates = selectedFunds.map((f) => {
+    const valReport = validationMap[f.scheme_code];
+    const eff = resolveEffectiveFundState(
+      f,
+      valReport,
+      identityMap?.[f.scheme_code],
+      seriesMap[f.scheme_code] || []
+    );
+    return { fund: f, valReport, eff };
+  });
+
   const allDatesSet = new Set<string>();
   const benchSeries = benchmarkStatus.available ? benchmarkStatus.series : [];
   benchSeries.forEach((p) => allDatesSet.add(p.date));
-  selectedFunds.forEach((f) => {
-    const s = seriesMap[f.scheme_code] || [];
-    s.forEach((p) => allDatesSet.add(p.date));
+
+  effectiveStates.forEach(({ eff }) => {
+    if (eff.usable) {
+      eff.effectiveSeries.forEach((p) => allDatesSet.add(p.date));
+    }
   });
 
   const dates = Array.from(allDatesSet).sort();
   const benchMap = new Map(benchSeries.map((p) => [p.date, p.nav]));
-  const fundMaps = selectedFunds.map((f) => ({
-    map: new Map((seriesMap[f.scheme_code] || []).map((p) => [p.date, p.nav])),
+  const fundMaps = effectiveStates.map(({ eff }) => ({
+    usable: eff.usable,
+    map: new Map(
+      (eff.usable ? eff.effectiveSeries : []).map((p) => [p.date, p.nav])
+    ),
   }));
+
+  const perFundValidationLines = effectiveStates.map(({ fund, valReport, eff }) => {
+    const diag = valReport?.rejectedPayloadDiagnostics;
+    const diagNote = diag
+      ? ` | Diagnostics: requested=${diag.requestedSchemeCode}, returned=${diag.returnedSchemeCode ?? 'null'}, rawRejectedObs=${diag.totalRawCount}`
+      : '';
+    return `# Scheme ${fund.scheme_code} (${fund.name}) | Status: ${valReport?.status || 'unavailable'} | Identity: ${eff.effectiveIdentity.status} | ValidObs: ${eff.validCount} | Window: ${eff.earliestDate ?? 'Unavailable'}..${eff.latestDate ?? 'Unavailable'} | FailureReason: ${eff.failureReason ?? 'None (OK)'}${diagNote}`;
+  });
 
   const provenance = [
     `# Data Provenance: Indian Mutual Funds Quantitative & Risk Analytics Studio`,
@@ -487,6 +714,8 @@ export function buildRawNavCsv(input: ExportBuilderInput): string {
     `# Benchmark: ${benchmarkStatus.name} (${benchmarkStatus.symbol}) | Variant: ${benchmarkStatus.variant} | Status: ${benchmarkStatus.available ? `Verified (${benchmarkStatus.source})` : `Unavailable (${benchmarkStatus.reason})`}`,
     `# Export Timestamp: ${exportTimestamp}`,
     `# Total Validated Trading Dates: ${dates.length}`,
+    `# SCHEME_VALIDATION_STATUS:`,
+    ...perFundValidationLines,
     `#`,
   ];
 
@@ -494,10 +723,22 @@ export function buildRawNavCsv(input: ExportBuilderInput): string {
     ? `Benchmark_${sanitizeFilenamePart(benchmarkStatus.name)}_${benchmarkStatus.variant}`
     : `Benchmark_${sanitizeFilenamePart(benchmarkStatus.name)}_Unavailable`;
 
-  const headers = ['Date', benchHeader, ...selectedFunds.map((f) => csvText(`${f.name} (${f.scheme_code})`))];
+  const headers = [
+    'Date',
+    benchHeader,
+    ...effectiveStates.map(({ fund, eff }) =>
+      csvText(
+        eff.usable
+          ? `${fund.name} (${fund.scheme_code})`
+          : `${fund.name} (${fund.scheme_code}) [Unavailable: ${eff.failureReason}]`
+      )
+    ),
+  ];
+
   const rows = dates.map((d) => {
     const bNav = benchmarkStatus.available ? (benchMap.get(d) ?? '') : 'Unavailable';
     const fundNavs = fundMaps.map((fm) => {
+      if (!fm.usable) return '"Unavailable"';
       const nav = fm.map.get(d);
       return nav !== undefined ? nav : '';
     });
@@ -515,6 +756,8 @@ interface DataExportModalProps {
   trailingMetaMap: Record<number, TrailingCagrResult>;
   seriesMap: Record<number, NavPoint[]>;
   validationMap: Record<number, NavValidationReport | undefined>;
+  identityMap?: Record<number, SchemeIdentityAudit | undefined>;
+  holdingsOverlap?: OverlapMatrixResult;
   benchmarkStatus: BenchmarkStatus;
   rfRate: number;
 }
@@ -527,6 +770,8 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
   trailingMetaMap,
   seriesMap,
   validationMap,
+  identityMap,
+  holdingsOverlap,
   benchmarkStatus,
   rfRate,
 }) => {
@@ -582,6 +827,8 @@ export const DataExportModal: React.FC<DataExportModalProps> = ({
     trailingMetaMap,
     seriesMap,
     validationMap,
+    identityMap,
+    holdingsOverlap,
     benchmarkStatus,
     rfRate,
   };

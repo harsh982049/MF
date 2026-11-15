@@ -6,6 +6,7 @@ export type OptionType = 'Growth' | 'IDCW' | 'Unknown';
 export type IdentityStatus =
   | 'verified'
   | 'reconciled_isin'
+  | 'unverified_registry'
   | 'code_mismatch'
   | 'cross_scheme_mismatch'
   | 'isin_mismatch'
@@ -24,6 +25,13 @@ export interface SchemeIdentityAudit {
   expectedPlan: PlanType;
   expectedOption: OptionType;
   expectedIsin: string | null;
+  registrySchemeCode: number | null;
+  registryName: string | null;
+  registryPlan: PlanType;
+  registryOption: OptionType;
+  registryIsin: string | null;
+  registryMatched: boolean;
+  providerSchemeCode: number | null;
   providerName: string | null;
   providerPlan: PlanType;
   providerOption: OptionType;
@@ -75,8 +83,19 @@ export interface RawNavObservation {
     | 'invalid_date'
     | 'nonpositive_nav'
     | 'nonfinite_nav'
+    | 'post_cutoff_nav'
     | 'duplicate_identical'
     | 'duplicate_conflict';
+}
+
+export interface RejectedPayloadDiagnostics {
+  requestedSchemeCode: number;
+  returnedSchemeCode: number | null;
+  returnedSchemeName: string | null;
+  returnedIsin: string | null;
+  reason: string;
+  totalRawCount: number;
+  sampleObservations: RawNavObservation[];
 }
 
 export interface NavValidationReport {
@@ -84,11 +103,13 @@ export interface NavValidationReport {
   usable: boolean;
   provider: string;
   fetchedAt: string;
+  valuationCutoffDate: string;
   totalRawCount: number;
   validCount: number;
   rejectedInvalidDateCount: number;
   rejectedNonPositiveCount: number;
   rejectedNonFiniteCount: number;
+  rejectedPostCutoffCount: number;
   duplicateIdenticalCount: number;
   duplicateConflicts: { date: string; values: number[] }[];
   earliestDate: string | null;
@@ -99,6 +120,7 @@ export interface NavValidationReport {
   quarantinedFromBreak: boolean;
   unavailableReason: string | null;
   warnings: string[];
+  rejectedPayloadDiagnostics: RejectedPayloadDiagnostics | null;
 }
 
 export interface ValidatedNavSeries {
@@ -141,6 +163,9 @@ export interface HoldingsStatus {
   asOfDate: string | null;
   source: string | null;
   partialCoverage: boolean;
+  disclosedWeightPct?: number | null;
+  unknownWeightPct?: number | null;
+  coverageThresholdPct?: number;
   reason: string | null;
 }
 
@@ -212,6 +237,47 @@ export interface TrailingCagr {
 export interface TrailingCagrResult {
   values: TrailingCagr;
   unavailableReasons: Record<string, string>;
+}
+
+export interface PairwiseOverlapMeta {
+  exactOverlap: number | null;
+  observedSubsetOverlap: number | null;
+  coverageA: number | null;
+  coverageB: number | null;
+  coverageStatus: 'complete' | 'partial_subset' | 'unavailable';
+  reason: string | null;
+}
+
+export interface OverlapMatrixResult {
+  available: boolean;
+  exactAvailable: boolean;
+  reason: string | null;
+  names: string[];
+  matrix: (number | null)[][];
+  observedSubsetMatrix: (number | null)[][];
+  coveragePctByFund: (number | null)[];
+  unknownPctByFund: (number | null)[];
+  coverageStatusByFund: ('complete' | 'partial' | 'unavailable')[];
+}
+
+export interface MarketCapExposureResult {
+  available: boolean;
+  exactAvailable: boolean;
+  isPartialSubset: boolean;
+  coveredWeightPct: number;
+  unknownWeightPct: number;
+  reason: string | null;
+  segments: { segment: string; weight: number }[];
+}
+
+export interface SectorExposureResult {
+  available: boolean;
+  exactAvailable: boolean;
+  isPartialSubset: boolean;
+  coveredWeightPct: number;
+  unknownWeightPct: number;
+  reason: string | null;
+  sectors: { sector: string; weight: number }[];
 }
 
 export interface RollingDistribution {

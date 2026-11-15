@@ -4,9 +4,13 @@ import {
   DurationSensitivityResult,
   FundHolding,
   LiquidityStressResult,
+  MarketCapExposureResult,
   NavPoint,
+  OverlapMatrixResult,
+  PairwiseOverlapMeta,
   RiskMetrics,
   RollingDistribution,
+  SectorExposureResult,
   SipSimulationResult,
   TrailingCagr,
   TrailingCagrResult,
@@ -861,23 +865,86 @@ export function computeReturnCorrelationMatrix(
   };
 }
 
+export const FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT = 95.0;
+
+export interface HoldingsCoverageSummary {
+  hasHoldings: boolean;
+  disclosedWeightPct: number;
+  unknownWeightPct: number;
+  isComplete: boolean;
+}
+
+export function computeHoldingsCoverage(
+  holdings: FundHolding[] | null | undefined,
+  partialCoverageFlag: boolean = false
+): HoldingsCoverageSummary {
+  if (!holdings || holdings.length === 0) {
+    return {
+      hasHoldings: false,
+      disclosedWeightPct: 0,
+      unknownWeightPct: 100,
+      isComplete: false,
+    };
+  }
+
+  const rawSum = holdings.reduce(
+    (acc, h) => acc + (h && Number.isFinite(h.weight) && h.weight > 0 ? h.weight : 0),
+    0
+  );
+  const disclosedWeightPct = Number(Math.min(100, Math.max(0, rawSum)).toFixed(2));
+  const unknownWeightPct = Number(Math.max(0, 100 - disclosedWeightPct).toFixed(2));
+  const isComplete = !partialCoverageFlag && disclosedWeightPct >= FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT;
+
+  return {
+    hasHoldings: true,
+    disclosedWeightPct,
+    unknownWeightPct,
+    isComplete,
+  };
+}
+
 /**
- * Pairwise stock-level portfolio overlap between two funds.
- * Returns null when either fund lacks sourced non-cash holdings; preserves genuine 0.
+ * Pairwise stock-level portfolio overlap with explicit coverage metadata.
+ * - Requires >= 95% portfolio coverage (and !partialCoverage) for an exact scheme overlap.
+ * - Preserves genuine numeric 0 for complete disjoint equity portfolios.
+ * - Suppresses exactOverlap (null) when either fund is partial, while optionally exposing
+ *   observedSubsetOverlap separately with explicit coverage labels.
  */
-export function computePairwiseOverlap(
+export function computePairwiseOverlapWithMeta(
   holdingsA: FundHolding[] | null | undefined,
   holdingsB: FundHolding[] | null | undefined,
-  excludeCash: boolean = true
-): number | null {
-  if (!holdingsA?.length || !holdingsB?.length) return null;
+  excludeCash: boolean = true,
+  partialFlagA: boolean = false,
+  partialFlagB: boolean = false
+): PairwiseOverlapMeta {
+  const covA = computeHoldingsCoverage(holdingsA, partialFlagA);
+  const covB = computeHoldingsCoverage(holdingsB, partialFlagB);
 
-  const validA = holdingsA.filter((h) => !excludeCash || !isCashEquivalentHolding(h));
-  const validB = holdingsB.filter((h) => !excludeCash || !isCashEquivalentHolding(h));
+  if (!covA.hasHoldings || !covB.hasHoldings) {
+    return {
+      exactOverlap: null,
+      observedSubsetOverlap: null,
+      coverageA: covA.hasHoldings ? covA.disclosedWeightPct : null,
+      coverageB: covB.hasHoldings ? covB.disclosedWeightPct : null,
+      coverageStatus: 'unavailable',
+      reason: 'Unavailable: Verified security-level portfolio holdings are required for both schemes.',
+    };
+  }
 
-  if (!validA.length || !validB.length) return null;
+  const validA = holdingsA!.filter((h) => !excludeCash || !isCashEquivalentHolding(h));
+  const validB = holdingsB!.filter((h) => !excludeCash || !isCashEquivalentHolding(h));
 
-  // Sum duplicate ISIN weights per portfolio defensively
+  if (!validA.length || !validB.length) {
+    return {
+      exactOverlap: null,
+      observedSubsetOverlap: null,
+      coverageA: covA.disclosedWeightPct,
+      coverageB: covB.disclosedWeightPct,
+      coverageStatus: 'unavailable',
+      reason: 'Unavailable: Non-cash equity holdings are missing for one or both schemes.',
+    };
+  }
+
   const mapA = new Map<string, number>();
   for (const h of validA) {
     const key = h.isin.trim().toUpperCase();
@@ -897,51 +964,147 @@ export function computePairwiseOverlap(
       overlap += Math.min(wA, wB);
     }
   }
+  const roundedOverlap = Number(overlap.toFixed(2));
 
-  return Number(overlap.toFixed(2));
+  if (!covA.isComplete || !covB.isComplete) {
+    return {
+      exactOverlap: null,
+      observedSubsetOverlap: roundedOverlap,
+      coverageA: covA.disclosedWeightPct,
+      coverageB: covB.disclosedWeightPct,
+      coverageStatus: 'partial_subset',
+      reason: `Partial holdings coverage (${covA.disclosedWeightPct.toFixed(2)}% vs ${covB.disclosedWeightPct.toFixed(2)}%; <${FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT}% threshold). Exact full-portfolio overlap suppressed; observed subset overlap is ${roundedOverlap.toFixed(2)}%.`,
+    };
+  }
+
+  return {
+    exactOverlap: roundedOverlap,
+    observedSubsetOverlap: roundedOverlap,
+    coverageA: covA.disclosedWeightPct,
+    coverageB: covB.disclosedWeightPct,
+    coverageStatus: 'complete',
+    reason: null,
+  };
+}
+
+/**
+ * Pairwise stock-level portfolio overlap between two funds.
+ * Returns null when either fund lacks >= 95% complete non-cash holdings; preserves genuine 0 on complete disjoint portfolios.
+ */
+export function computePairwiseOverlap(
+  holdingsA: FundHolding[] | null | undefined,
+  holdingsB: FundHolding[] | null | undefined,
+  excludeCash: boolean = true,
+  partialFlagA: boolean = false,
+  partialFlagB: boolean = false
+): number | null {
+  return computePairwiseOverlapWithMeta(
+    holdingsA,
+    holdingsB,
+    excludeCash,
+    partialFlagA,
+    partialFlagB
+  ).exactOverlap;
 }
 
 export function computeOverlapMatrix(
-  funds: { scheme_code: number; name: string; holdings: FundHolding[] | null | undefined }[]
-): { available: boolean; reason: string | null; names: string[]; matrix: (number | null)[][] } {
+  funds: {
+    scheme_code: number;
+    name: string;
+    holdings: FundHolding[] | null | undefined;
+    partialCoverage?: boolean;
+  }[]
+): OverlapMatrixResult {
   const names = funds.map((f) => f.name);
   const n = funds.length;
   const matrix: (number | null)[][] = Array.from({ length: n }, () => Array(n).fill(null));
+  const observedSubsetMatrix: (number | null)[][] = Array.from({ length: n }, () => Array(n).fill(null));
+
+  const coverages = funds.map((f) => computeHoldingsCoverage(f.holdings, Boolean(f.partialCoverage)));
+  const coveragePctByFund = coverages.map((c) => (c.hasHoldings ? c.disclosedWeightPct : null));
+  const unknownPctByFund = coverages.map((c) => (c.hasHoldings ? c.unknownWeightPct : null));
+  const coverageStatusByFund: ('complete' | 'partial' | 'unavailable')[] = coverages.map((c) =>
+    !c.hasHoldings ? 'unavailable' : c.isComplete ? 'complete' : 'partial'
+  );
+
   let anyHoldings = false;
+  let exactAvailable = false;
 
   for (let i = 0; i < n; i++) {
-    const hI = funds[i].holdings;
-    if (hI && hI.length > 0) anyHoldings = true;
+    const covI = coverages[i];
+    if (covI.hasHoldings) anyHoldings = true;
     for (let j = 0; j < n; j++) {
       if (i === j) {
-        matrix[i][j] = hI && hI.length > 0 ? 100.0 : null;
+        if (covI.isComplete) {
+          matrix[i][j] = 100.0;
+          observedSubsetMatrix[i][j] = 100.0;
+          if (n === 1) exactAvailable = true;
+        } else if (covI.hasHoldings) {
+          matrix[i][j] = null;
+          observedSubsetMatrix[i][j] = Number(covI.disclosedWeightPct.toFixed(1));
+        }
       } else if (i < j) {
-        const ov = computePairwiseOverlap(hI, funds[j].holdings, true);
-        matrix[i][j] = ov;
-        matrix[j][i] = ov;
+        const res = computePairwiseOverlapWithMeta(
+          funds[i].holdings,
+          funds[j].holdings,
+          true,
+          Boolean(funds[i].partialCoverage),
+          Boolean(funds[j].partialCoverage)
+        );
+        matrix[i][j] = res.exactOverlap;
+        matrix[j][i] = res.exactOverlap;
+        observedSubsetMatrix[i][j] = res.observedSubsetOverlap;
+        observedSubsetMatrix[j][i] = res.observedSubsetOverlap;
+        if (res.exactOverlap !== null) {
+          exactAvailable = true;
+        }
       }
     }
   }
 
+  let reason: string | null = null;
+  if (!anyHoldings) {
+    reason = 'Unavailable: None of the selected schemes have verified portfolio holdings.';
+  } else if (!exactAvailable) {
+    const partialLabels = funds
+      .map((f, i) =>
+        coverages[i].hasHoldings
+          ? `${f.name.split(' ').slice(0, 2).join(' ')}: ${coverages[i].disclosedWeightPct.toFixed(2)}% disclosed / ${coverages[i].unknownWeightPct.toFixed(2)}% unknown`
+          : null
+      )
+      .filter(Boolean)
+      .join('; ');
+    reason = `Exact full-portfolio overlap suppressed because disclosed holdings are below ${FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT}% (${partialLabels}). Observed subset overlap cannot be presented as exact scheme overlap.`;
+  }
+
   return {
     available: anyHoldings,
-    reason: anyHoldings ? null : 'Unavailable: None of the selected schemes have verified portfolio holdings.',
+    exactAvailable,
+    reason,
     names,
     matrix,
+    observedSubsetMatrix,
+    coveragePctByFund,
+    unknownPctByFund,
+    coverageStatusByFund,
   };
 }
 
 export function aggregateMarketCapExposure(
-  funds: { holdings: FundHolding[] | null | undefined }[],
+  funds: { holdings: FundHolding[] | null | undefined; partialCoverage?: boolean }[],
   weights?: number[]
-): { available: boolean; reason: string | null; segments: { segment: string; weight: number }[] } {
+): MarketCapExposureResult {
   const validEntries = funds
     .map((f, idx) => ({ f, origW: weights ? weights[idx] : 1 }))
-    .filter((entry) => entry.f.holdings && entry.f.holdings.length > 0);
+    .filter((entry) => entry.f.holdings && entry.f.holdings.length > 0 && entry.origW > 0);
 
   if (validEntries.length === 0) {
     return {
       available: false,
+      exactAvailable: false,
+      isPartialSubset: false,
+      coveredWeightPct: 0,
+      unknownWeightPct: 100,
       reason: 'Unavailable: Verified security-level holdings are required for market-cap look-through.',
       segments: [],
     };
@@ -956,43 +1119,79 @@ export function aggregateMarketCapExposure(
     'Cash / Sovereign': 0,
   };
 
+  let coveredRaw = 0;
+  let allComplete = true;
+
   validEntries.forEach(({ f, origW }) => {
     const fundWeight = origW / totalOrigW;
+    const cov = computeHoldingsCoverage(f.holdings, Boolean(f.partialCoverage));
+    if (!cov.isComplete) allComplete = false;
+
     f.holdings!.forEach((h) => {
-      totals[h.mcap] = (totals[h.mcap] || 0) + fundWeight * h.weight;
+      const contrib = fundWeight * h.weight;
+      totals[h.mcap] = (totals[h.mcap] || 0) + contrib;
+      coveredRaw += contrib;
     });
   });
 
-  const sum = Object.values(totals).reduce((a, b) => a + b, 0);
-  if (sum <= 0) {
+  if (coveredRaw <= 0) {
     return {
       available: false,
+      exactAvailable: false,
+      isPartialSubset: false,
+      coveredWeightPct: 0,
+      unknownWeightPct: 100,
       reason: 'Unavailable: Holdings weights sum to zero.',
       segments: [],
     };
   }
 
+  const coveredWeightPct = Number(Math.min(100, coveredRaw).toFixed(2));
+  const unknownWeightPct = Number(Math.max(0, 100 - coveredWeightPct).toFixed(2));
+  const exactAvailable = allComplete && unknownWeightPct < 0.5;
+  const isPartialSubset = !exactAvailable;
+
+  // Preserve exact portfolio share relative to 100% NAV — NEVER re-normalize a 65% subset to 100%!
+  const segments = Object.entries(totals).map(([segment, val]) => ({
+    segment,
+    weight: Number(val.toFixed(2)),
+  }));
+
+  if (isPartialSubset || unknownWeightPct > 0.05) {
+    segments.push({
+      segment: 'Unknown / Undisclosed',
+      weight: unknownWeightPct,
+    });
+  }
+
   return {
     available: true,
-    reason: null,
-    segments: Object.entries(totals).map(([segment, val]) => ({
-      segment,
-      weight: Number(((val / sum) * 100).toFixed(1)),
-    })),
+    exactAvailable,
+    isPartialSubset,
+    coveredWeightPct,
+    unknownWeightPct,
+    reason: isPartialSubset
+      ? `Covered subset only: ${coveredWeightPct.toFixed(2)}% disclosed; ${unknownWeightPct.toFixed(2)}% Unknown / Undisclosed (<${FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT}% full-portfolio threshold).`
+      : null,
+    segments,
   };
 }
 
 export function aggregateSectorExposure(
-  funds: { holdings: FundHolding[] | null | undefined }[],
+  funds: { holdings: FundHolding[] | null | undefined; partialCoverage?: boolean }[],
   weights?: number[]
-): { available: boolean; reason: string | null; sectors: { sector: string; weight: number }[] } {
+): SectorExposureResult {
   const validEntries = funds
     .map((f, idx) => ({ f, origW: weights ? weights[idx] : 1 }))
-    .filter((entry) => entry.f.holdings && entry.f.holdings.length > 0);
+    .filter((entry) => entry.f.holdings && entry.f.holdings.length > 0 && entry.origW > 0);
 
   if (validEntries.length === 0) {
     return {
       available: false,
+      exactAvailable: false,
+      isPartialSubset: false,
+      coveredWeightPct: 0,
+      unknownWeightPct: 100,
       reason: 'Unavailable: Verified security-level holdings are required for sector exposure.',
       sectors: [],
     };
@@ -1000,32 +1199,63 @@ export function aggregateSectorExposure(
 
   const totalOrigW = validEntries.reduce((acc, e) => acc + e.origW, 0) || 1;
   const totals: Record<string, number> = {};
+  let coveredRaw = 0;
+  let allComplete = true;
 
   validEntries.forEach(({ f, origW }) => {
     const fundWeight = origW / totalOrigW;
+    const cov = computeHoldingsCoverage(f.holdings, Boolean(f.partialCoverage));
+    if (!cov.isComplete) allComplete = false;
+
     f.holdings!.forEach((h) => {
-      totals[h.sector] = (totals[h.sector] || 0) + fundWeight * h.weight;
+      const contrib = fundWeight * h.weight;
+      totals[h.sector] = (totals[h.sector] || 0) + contrib;
+      coveredRaw += contrib;
     });
   });
 
-  const sum = Object.values(totals).reduce((a, b) => a + b, 0);
-  if (sum <= 0) {
+  if (coveredRaw <= 0) {
     return {
       available: false,
+      exactAvailable: false,
+      isPartialSubset: false,
+      coveredWeightPct: 0,
+      unknownWeightPct: 100,
       reason: 'Unavailable: Sector weights sum to zero.',
       sectors: [],
     };
   }
 
+  const coveredWeightPct = Number(Math.min(100, coveredRaw).toFixed(2));
+  const unknownWeightPct = Number(Math.max(0, 100 - coveredWeightPct).toFixed(2));
+  const exactAvailable = allComplete && unknownWeightPct < 0.5;
+  const isPartialSubset = !exactAvailable;
+
+  // Keep true weight against 100% AUM and explicitly represent Unknown / Undisclosed share
+  const sectors = Object.entries(totals)
+    .map(([sector, val]) => ({
+      sector,
+      weight: Number(val.toFixed(2)),
+    }))
+    .sort((a, b) => b.weight - a.weight);
+
+  if (isPartialSubset || unknownWeightPct > 0.05) {
+    sectors.push({
+      sector: 'Unknown / Undisclosed',
+      weight: unknownWeightPct,
+    });
+  }
+
   return {
     available: true,
-    reason: null,
-    sectors: Object.entries(totals)
-      .map(([sector, val]) => ({
-        sector,
-        weight: Number(((val / sum) * 100).toFixed(1)),
-      }))
-      .sort((a, b) => b.weight - a.weight),
+    exactAvailable,
+    isPartialSubset,
+    coveredWeightPct,
+    unknownWeightPct,
+    reason: isPartialSubset
+      ? `Covered subset only: ${coveredWeightPct.toFixed(2)}% disclosed; ${unknownWeightPct.toFixed(2)}% Unknown / Undisclosed (<${FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT}% full-portfolio threshold).`
+      : null,
+    sectors,
   };
 }
 

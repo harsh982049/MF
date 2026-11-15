@@ -22,6 +22,7 @@ import {
   NavPoint,
   NavValidationReport,
   RiskMetrics,
+  SchemeIdentityAudit,
   TrailingCagrResult,
   ValidatedNavSeries,
 } from './types/quant';
@@ -31,7 +32,6 @@ import {
   DEFAULT_VERIFIED_PRESET_CODES,
   resolveBenchmarkSeries,
   fetchLiveMfNav,
-  validateMfapiPayload,
 } from './data/presetFunds';
 import {
   computeTrailingCagrWithMeta,
@@ -59,8 +59,8 @@ import { FundSearchModal } from './components/FundSearchModal';
 import { FundFactsheetModal } from './components/FundFactsheetModal';
 import { DataExportModal } from './components/DataExportModal';
 import { PythonExporter } from './components/PythonExporter';
-import { classifyAndBuildFundMeta } from './utils/mfapiClassifier';
 import { AMFI_SNAPSHOT_DATE, PRESET_RECONCILIATION_TABLE } from './utils/schemeIdentity';
+import { addSchemeWorkflow, SchemeExpectationInput } from './utils/schemeWorkflow';
 
 const COLOR_PALETTE = [
   '#38bdf8',
@@ -121,15 +121,24 @@ export default function App() {
       .filter((f): f is FundMeta => Boolean(f));
   }, [selectedCodes, allFunds]);
 
-  // Derived valid NAV series & validation report maps
+  // Derived valid NAV series, validation report & effective runtime identity maps
+  const identityMap = useMemo(() => {
+    const map: Record<number, SchemeIdentityAudit | undefined> = {};
+    for (const code of selectedCodes) {
+      map[code] = validatedSeriesMap[code]?.identity ?? allFunds[code]?.identityStatus;
+    }
+    return map;
+  }, [selectedCodes, validatedSeriesMap, allFunds]);
+
   const fundSeriesMap = useMemo(() => {
     const map: Record<number, NavPoint[]> = {};
     for (const code of selectedCodes) {
       const entry = validatedSeriesMap[code];
-      map[code] = entry && entry.validation.usable ? entry.points : [];
+      const effId = entry?.identity ?? allFunds[code]?.identityStatus;
+      map[code] = entry && entry.validation.usable && effId?.verified ? entry.points : [];
     }
     return map;
-  }, [selectedCodes, validatedSeriesMap]);
+  }, [selectedCodes, validatedSeriesMap, allFunds]);
 
   const validationMap = useMemo(() => {
     const map: Record<number, NavValidationReport | undefined> = {};
@@ -208,84 +217,29 @@ export default function App() {
   };
 
   const handleAddCustomScheme = async (
-    code: number
+    code: number,
+    expectation?: Partial<SchemeExpectationInput>
   ): Promise<{ ok: boolean; message?: string }> => {
-    const rec = PRESET_RECONCILIATION_TABLE[code];
-    if (rec && !rec.selectable) {
-      return { ok: false, message: rec.reason };
+    const result = await addSchemeWorkflow({
+      requestedCode: expectation?.requestedCode ?? code,
+      expectedName: expectation?.expectedName,
+      expectedPlan: expectation?.expectedPlan,
+      expectedOption: expectation?.expectedOption,
+      expectedIsin: expectation?.expectedIsin,
+      selectedCodes,
+      customFunds,
+      validatedSeriesMap,
+      allFunds,
+    });
+
+    if (!result.ok) {
+      return { ok: false, message: result.message };
     }
 
-    if (allFunds[code]) {
-      const existingSeries = validatedSeriesMap[code] ?? (await fetchLiveMfNav(code, { expectedMeta: allFunds[code] }));
-      setValidatedSeriesMap((prev) => ({ ...prev, [code]: existingSeries }));
-
-      if (!existingSeries.identity?.verified) {
-        return {
-          ok: false,
-          message: existingSeries.identity?.reason || 'Preset identity verification failed.',
-        };
-      }
-      if (!existingSeries.validation.usable) {
-        return {
-          ok: false,
-          message: existingSeries.validation.unavailableReason || 'Scheme NAV validation failed.',
-        };
-      }
-      if (!selectedCodes.includes(code)) {
-        setSelectedCodes((prev) => [...prev, code]);
-      }
-      return { ok: true, message: `Added verified scheme ${allFunds[code].name} (${code}).` };
-    }
-
-    try {
-      const resp = await fetch(`https://api.mfapi.in/mf/${code}`);
-      if (!resp.ok) {
-        return { ok: false, message: `Provider returned HTTP ${resp.status} for scheme ${code}.` };
-      }
-
-      const json = await resp.json();
-      if (!json || !json.meta) {
-        return { ok: false, message: `Malformed provider response for scheme ${code}.` };
-      }
-
-      const newFund = classifyAndBuildFundMeta(json.meta);
-      const validated = validateMfapiPayload(code, json, { expectedMeta: newFund });
-
-      if (!validated.identity?.verified) {
-        return {
-          ok: false,
-          message:
-            validated.identity?.reason ||
-            `Scheme ${code} blocked: plan, option, or ISIN could not be verified.`,
-        };
-      }
-
-      if (!validated.validation.usable) {
-        return {
-          ok: false,
-          message:
-            validated.validation.unavailableReason ||
-            `Scheme ${code} NAV series failed validation (${validated.validation.status}).`,
-        };
-      }
-
-      setCustomFunds((prev) => ({ ...prev, [code]: newFund }));
-      setValidatedSeriesMap((prev) => ({ ...prev, [code]: validated }));
-      if (!selectedCodes.includes(code)) {
-        setSelectedCodes((prev) => [...prev, code]);
-      }
-      return {
-        ok: true,
-        message: validated.validation.quarantinedFromBreak
-          ? `Added ${newFund.name} (${code}) with corporate-action break quarantine notice.`
-          : `Added ${newFund.name} (${code}) — verified identity & NAV series.`,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        message: err instanceof Error ? err.message : `Network error adding scheme ${code}.`,
-      };
-    }
+    setCustomFunds(result.nextCustomFunds);
+    setValidatedSeriesMap(result.nextValidatedSeriesMap);
+    setSelectedCodes(result.nextSelectedCodes);
+    return { ok: true, message: result.message };
   };
 
   // Trailing Returns with unavailable reasons
@@ -348,12 +302,13 @@ export default function App() {
     });
   }, [selectedCodes, allFunds, fundSeriesMap, validationMap, benchmarkSeries, rfRate]);
 
-  // Overlap, Market-Cap, Sector & Return Correlation
+  // Overlap, Market-Cap, Sector & Return Correlation (coverage-aware)
   const overlapData = useMemo(() => {
     const fundsList = selectedCodes.map((code) => ({
       scheme_code: code,
       name: allFunds[code]?.name || `Scheme ${code}`,
       holdings: allFunds[code]?.holdings ?? null,
+      partialCoverage: allFunds[code]?.holdingsStatus.partialCoverage ?? false,
     }));
 
     const matrixRes = computeOverlapMatrix(fundsList);
@@ -373,10 +328,16 @@ export default function App() {
     const corrRes = computeReturnCorrelationMatrix(activeSeriesOnly, nameMap);
 
     return {
+      overlapMatrixResult: matrixRes,
       overlapAvailable: matrixRes.available,
+      overlapExactAvailable: matrixRes.exactAvailable,
       overlapReason: matrixRes.reason,
       names: matrixRes.names,
       matrix: matrixRes.matrix,
+      observedSubsetMatrix: matrixRes.observedSubsetMatrix,
+      coveragePctByFund: matrixRes.coveragePctByFund,
+      unknownPctByFund: matrixRes.unknownPctByFund,
+      coverageStatusByFund: matrixRes.coverageStatusByFund,
       mcapExposure,
       sectorExposure,
       corrAvailable: corrRes.available,
@@ -471,20 +432,35 @@ export default function App() {
     };
   }, [selectedCodes, allFunds, fundSeriesMap, validationMap, benchmarkSeries, timeHorizon]);
 
-  // Active warnings across selected schemes
+  // Active warnings across selected schemes (exposes identity mismatches & rejected payload diagnostics cleanly)
   const activeWarnings = useMemo(() => {
     const msgs: string[] = [];
     selectedCodes.forEach((code) => {
       const val = validationMap[code];
+      const effId = identityMap[code];
       if (!val) return;
-      if (!val.usable && val.unavailableReason) {
-        msgs.push(`Scheme ${code}: ${val.unavailableReason}`);
-      } else if (val.quarantinedFromBreak) {
-        val.corporateActionBreaks.forEach((b) => msgs.push(`Scheme ${code}: ${b.explanation}`));
+      if (!val.usable) {
+        const diag = val.rejectedPayloadDiagnostics;
+        const diagDetail =
+          diag && diag.returnedSchemeCode !== null && diag.returnedSchemeCode !== code
+            ? ` [Rejected payload: returned code ${diag.returnedSchemeCode} (${diag.returnedSchemeName || 'Unknown'}), ${diag.totalRawCount} unattributed obs suppressed]`
+            : '';
+        msgs.push(
+          `Scheme ${code}: ${val.unavailableReason || effId?.reason || 'Validation failed.'}${diagDetail}`
+        );
+      } else {
+        if (val.rejectedPostCutoffCount > 0) {
+          msgs.push(
+            `Scheme ${code}: Ignored ${val.rejectedPostCutoffCount} post-cutoff NAV observation(s) after ${val.valuationCutoffDate}.`
+          );
+        }
+        if (val.quarantinedFromBreak) {
+          val.corporateActionBreaks.forEach((b) => msgs.push(`Scheme ${code}: ${b.explanation}`));
+        }
       }
     });
     return msgs;
-  }, [selectedCodes, validationMap]);
+  }, [selectedCodes, validationMap, identityMap]);
 
   return (
     <div className="min-h-screen bg-[#0b0f19] text-slate-100 flex flex-col font-sans selection:bg-indigo-900 selection:text-white">
@@ -573,13 +549,15 @@ export default function App() {
 
             {activeFundsList.map((fund) => {
               const val = validationMap[fund.scheme_code];
+              const effId = identityMap[fund.scheme_code] ?? fund.identityStatus;
               const isQuarantined = val?.quarantinedFromBreak;
+              const isRuntimeHealthy = Boolean(effId.verified && (!val || val.usable));
               return (
                 <div
                   key={fund.scheme_code}
                   className="inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-lg bg-slate-800/90 border border-slate-700/80 text-slate-200 text-xs shadow-xs"
                 >
-                  {fund.identityStatus.verified ? (
+                  {isRuntimeHealthy ? (
                     <ShieldCheck className="w-3 h-3 text-emerald-400 shrink-0" />
                   ) : (
                     <ShieldAlert className="w-3 h-3 text-rose-400 shrink-0" />
@@ -1214,9 +1192,14 @@ export default function App() {
 
                 <OverlapHeatmap
                   available={overlapData.overlapAvailable}
+                  exactAvailable={overlapData.overlapExactAvailable}
                   reason={overlapData.overlapReason}
                   names={overlapData.names}
                   matrix={overlapData.matrix}
+                  observedSubsetMatrix={overlapData.observedSubsetMatrix}
+                  coveragePctByFund={overlapData.coveragePctByFund}
+                  unknownPctByFund={overlapData.unknownPctByFund}
+                  coverageStatusByFund={overlapData.coverageStatusByFund}
                 />
               </div>
 
@@ -1231,21 +1214,32 @@ export default function App() {
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                   <h3 className="text-sm font-bold text-white mb-1">Look-Through Market-Cap Breakdown</h3>
-                  <p className="text-xs text-slate-400 mb-4">Aggregate disclosed market-cap allocation across sourced portfolios.</p>
+                  <p className="text-xs text-slate-400 mb-3">
+                    {overlapData.mcapExposure.isPartialSubset
+                      ? overlapData.mcapExposure.reason
+                      : 'Aggregate disclosed market-cap allocation across sourced portfolios.'}
+                  </p>
 
                   {overlapData.mcapExposure.available ? (
                     <div className="space-y-3">
+                      {overlapData.mcapExposure.isPartialSubset && (
+                        <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60 text-[11px] text-amber-200 font-mono">
+                          Covered Subset: {overlapData.mcapExposure.coveredWeightPct.toFixed(2)}% | Unknown / Undisclosed: {overlapData.mcapExposure.unknownWeightPct.toFixed(2)}%
+                        </div>
+                      )}
                       {overlapData.mcapExposure.segments.map((item) => (
                         <div key={item.segment} className="space-y-1">
                           <div className="flex items-center justify-between text-xs">
-                            <span className="text-slate-300 font-medium">{item.segment}</span>
+                            <span className={`font-medium ${item.segment === 'Unknown / Undisclosed' ? 'text-amber-300' : 'text-slate-300'}`}>
+                              {item.segment}
+                            </span>
                             <span className="font-mono font-bold text-slate-200">{item.weight.toFixed(1)}%</span>
                           </div>
                           <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
                             <div
                               className="h-full rounded-full"
                               style={{
-                                width: `${item.weight}%`,
+                                width: `${Math.min(100, item.weight)}%`,
                                 backgroundColor:
                                   item.segment === 'Large Cap'
                                     ? '#38bdf8'
@@ -1253,6 +1247,8 @@ export default function App() {
                                     ? '#10b981'
                                     : item.segment === 'Small Cap'
                                     ? '#f59e0b'
+                                    : item.segment === 'Unknown / Undisclosed'
+                                    ? '#64748b'
                                     : '#8b5cf6',
                               }}
                             />
@@ -1269,17 +1265,28 @@ export default function App() {
 
                 <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5 shadow-sm">
                   <h3 className="text-sm font-bold text-white mb-1">Top Sector Concentrations</h3>
-                  <p className="text-xs text-slate-400 mb-4">Look-through industry sector exposures from verified holdings.</p>
+                  <p className="text-xs text-slate-400 mb-3">
+                    {overlapData.sectorExposure.isPartialSubset
+                      ? overlapData.sectorExposure.reason
+                      : 'Look-through industry sector exposures from verified holdings.'}
+                  </p>
 
                   {overlapData.sectorExposure.available ? (
-                    <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
-                      {overlapData.sectorExposure.sectors.slice(0, 8).map((item) => (
+                    <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+                      {overlapData.sectorExposure.isPartialSubset && (
+                        <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60 text-[11px] text-amber-200 font-mono mb-2">
+                          Covered Subset: {overlapData.sectorExposure.coveredWeightPct.toFixed(2)}% | Unknown / Undisclosed: {overlapData.sectorExposure.unknownWeightPct.toFixed(2)}%
+                        </div>
+                      )}
+                      {overlapData.sectorExposure.sectors.slice(0, 10).map((item) => (
                         <div key={item.sector} className="flex items-center justify-between text-xs">
-                          <span className="text-slate-300 font-medium truncate max-w-[200px]">{item.sector}</span>
+                          <span className={`font-medium truncate max-w-[200px] ${item.sector === 'Unknown / Undisclosed' ? 'text-amber-300' : 'text-slate-300'}`}>
+                            {item.sector}
+                          </span>
                           <div className="flex items-center gap-3">
                             <div className="w-28 bg-slate-800 rounded-full h-1.5 overflow-hidden">
                               <div
-                                className="h-full bg-emerald-500 rounded-full"
+                                className={`h-full rounded-full ${item.sector === 'Unknown / Undisclosed' ? 'bg-slate-500' : 'bg-emerald-500'}`}
                                 style={{ width: `${Math.min(100, item.weight * 2.5)}%` }}
                               />
                             </div>
@@ -1795,6 +1802,8 @@ export default function App() {
         trailingMetaMap={trailingMetaMap}
         seriesMap={fundSeriesMap}
         validationMap={validationMap}
+        identityMap={identityMap}
+        holdingsOverlap={overlapData.overlapMatrixResult}
         benchmarkStatus={benchmarkStatus}
         rfRate={rfRate}
       />

@@ -73,6 +73,18 @@ export const FundFactsheetModal: React.FC<FundFactsheetModalProps> = ({ fund, is
               <div className="text-[11px] opacity-90 mt-0.5">
                 {fund.identityStatus.reason || 'Scheme identity check applied.'}
               </div>
+              <div className="text-[10px] font-mono opacity-80 mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
+                <span>
+                  Registry: {fund.identityStatus.registryMatched
+                    ? `${fund.identityStatus.registrySchemeCode} (${fund.identityStatus.registryIsin ?? 'No ISIN'})`
+                    : 'Not matched in AMFI registry'}
+                </span>
+                <span>
+                  Fetched Feed: {fund.identityStatus.providerSchemeCode ?? 'Unavailable'} (
+                  {fund.identityStatus.providerName ?? 'Unavailable'} ·{' '}
+                  {fund.identityStatus.providerIsin ?? 'No ISIN'})
+                </span>
+              </div>
             </div>
           </div>
 
@@ -271,10 +283,23 @@ export const FundFactsheetModal: React.FC<FundFactsheetModalProps> = ({ fund, is
               <span className="font-semibold text-white">Portfolio Holdings</span>
               <span className="text-slate-400 font-mono text-[11px]">
                 {fund.holdings && fund.holdings.length > 0
-                  ? `${fund.holdings.length} disclosed line items (${fund.holdingsStatus.partialCoverage ? 'partial coverage' : 'full'})`
+                  ? `${fund.holdings.length} disclosed line items · Coverage: ${
+                      fund.holdingsStatus.disclosedWeightPct !== null && fund.holdingsStatus.disclosedWeightPct !== undefined
+                        ? `${fund.holdingsStatus.disclosedWeightPct.toFixed(2)}% disclosed / ${(fund.holdingsStatus.unknownWeightPct ?? 0).toFixed(2)}% unknown`
+                        : fund.holdingsStatus.partialCoverage
+                        ? 'partial subset'
+                        : 'full'
+                    }`
                   : 'Unavailable'}
               </span>
             </div>
+
+            {fund.holdings && fund.holdings.length > 0 && fund.holdingsStatus.partialCoverage && (
+              <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60 text-[11px] text-amber-200">
+                Partial holdings disclosure: {fund.holdingsStatus.disclosedWeightPct?.toFixed(2) ?? 'Partial'}% disclosed;{' '}
+                {fund.holdingsStatus.unknownWeightPct?.toFixed(2) ?? 'Remainder'}% unknown/undisclosed. Exact full-portfolio overlap is suppressed until ≥95% coverage is ingested.
+              </div>
+            )}
 
             {fund.holdings && fund.holdings.length > 0 ? (
               <div className="overflow-x-auto rounded-xl border border-slate-800">

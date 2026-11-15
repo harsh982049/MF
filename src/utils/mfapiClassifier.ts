@@ -6,6 +6,7 @@
 
 import { AssetClass, FundMeta } from '../types/quant';
 import {
+  DiscoveryValidationOptions,
   isValidIsin,
   parsePlanAndOption,
   validateDiscoveredSchemeIdentity,
@@ -21,8 +22,12 @@ export interface MfapiMeta {
   isin_div_reinvestment?: string | null;
 }
 
-export function classifyAndBuildFundMeta(meta: MfapiMeta): FundMeta {
-  const name = (meta.scheme_name || `Scheme ${meta.scheme_code}`).trim();
+export function classifyAndBuildFundMeta(
+  meta: MfapiMeta,
+  discoveryOptions: DiscoveryValidationOptions = {}
+): FundMeta {
+  const effectiveCode = discoveryOptions.requestedCode ?? meta.scheme_code;
+  const name = (meta.scheme_name || `Scheme ${effectiveCode}`).trim();
   const rawCat = (meta.scheme_category || '').toLowerCase();
   const rawName = name.toLowerCase();
 
@@ -124,26 +129,32 @@ export function classifyAndBuildFundMeta(meta: MfapiMeta): FundMeta {
       ? meta.isin_div_reinvestment || meta.isin_growth || null
       : meta.isin_growth || null;
   const resolvedIsin = candidateIsin && isValidIsin(candidateIsin) ? candidateIsin.trim().toUpperCase() : null;
-  const identityStatus = validateDiscoveredSchemeIdentity({
-    scheme_code: meta.scheme_code,
-    scheme_name: name,
-    isin_growth: meta.isin_growth,
-    isin_div_reinvestment: meta.isin_div_reinvestment,
-    fund_house: meta.fund_house,
-    scheme_category: meta.scheme_category,
-    scheme_type: meta.scheme_type,
-  });
+  const identityStatus = validateDiscoveredSchemeIdentity(
+    {
+      scheme_code: meta.scheme_code,
+      scheme_name: name,
+      isin_growth: meta.isin_growth,
+      isin_div_reinvestment: meta.isin_div_reinvestment,
+      fund_house: meta.fund_house,
+      scheme_category: meta.scheme_category,
+      scheme_type: meta.scheme_type,
+    },
+    {
+      ...discoveryOptions,
+      requestedCode: effectiveCode,
+    }
+  );
 
   return {
-    scheme_code: meta.scheme_code,
-    name,
+    scheme_code: identityStatus.scheme_code,
+    name: identityStatus.verified ? identityStatus.registryName || name : name,
     category,
     asset_class: assetClass,
     fund_house: meta.fund_house || 'Unavailable (not supplied by feed)',
     benchmark_symbol: benchmarkSymbol,
-    isin: resolvedIsin,
-    plan: identityStatus.providerPlan,
-    option: identityStatus.providerOption,
+    isin: identityStatus.verified ? identityStatus.registryIsin || resolvedIsin : resolvedIsin,
+    plan: identityStatus.verified ? identityStatus.registryPlan : identityStatus.providerPlan,
+    option: identityStatus.verified ? identityStatus.registryOption : identityStatus.providerOption,
     aum_cr: null,
     aum_as_of: null,
     inception_date: null,
@@ -167,11 +178,14 @@ export function classifyAndBuildFundMeta(meta: MfapiMeta): FundMeta {
       asOfDate: null,
       source: null,
       partialCoverage: false,
+      disclosedWeightPct: null,
+      unknownWeightPct: null,
+      coverageThresholdPct: 95,
       reason:
         'Unavailable: Monthly AMC security-level portfolio disclosure has not been ingested for this discovered scheme (Batch 5).',
     },
     identityStatus,
-    disclosureSource: 'mfapi.in (NAV & AMFI scheme identity only; AMC factsheet unavailable)',
+    disclosureSource: 'mfapi.in (NAV & AMFI scheme identity check; AMC factsheet unavailable)',
     asOfDate: null,
     isStatutoryDisclosure: false,
   };
