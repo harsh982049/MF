@@ -14,6 +14,7 @@ import {
   computeHoldingsCoverage,
   computeRollingReturns,
   computeBenchmarkHitRate,
+  EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT,
   FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT,
 } from '../utils/quantEngine';
 import { getIndiaValuationDateIso } from '../utils/navValidator';
@@ -201,7 +202,11 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
     'NAV Observations',
     'Holdings Coverage Status',
     'Holdings Disclosed (%)',
+    'Holdings Non-Cash (%)',
+    'Holdings Classified Cash (%)',
+    'Holdings Raw Total (%)',
     'Holdings Unknown (%)',
+    'Holdings Exactness Allowed',
     'ISIN',
     'Plan',
     'Option',
@@ -293,11 +298,7 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
     );
 
     const hCov = computeHoldingsCoverage(fund.holdings, fund.holdingsStatus.partialCoverage);
-    const holdingsCovLabel = !hCov.hasHoldings
-      ? 'unavailable'
-      : hCov.isComplete
-      ? 'complete'
-      : 'partial_subset';
+    const holdingsCovLabel = hCov.coverageStatus;
 
     const diag = valReport?.rejectedPayloadDiagnostics ?? null;
 
@@ -354,7 +355,11 @@ export function buildComparisonCsv(input: ExportBuilderInput): string {
       eff.validCount,
       csvText(holdingsCovLabel),
       hCov.hasHoldings ? hCov.disclosedWeightPct : '"Unavailable"',
+      hCov.hasHoldings ? hCov.nonCashWeightPct : '"Unavailable"',
+      hCov.hasHoldings ? hCov.cashWeightPct : '"Unavailable"',
+      hCov.hasHoldings ? hCov.rawTotalWeightPct : '"Unavailable"',
       hCov.hasHoldings ? hCov.unknownWeightPct : '"Unavailable"',
+      csvText(hCov.isExact ? 'Yes' : 'No'),
       csvText(fund.isin),
       csvText(fund.plan),
       csvText(fund.option),
@@ -472,11 +477,19 @@ export function buildComparisonJsonPayload(input: ExportBuilderInput) {
           : null,
         holdingsCoverage: {
           available: hCov.hasHoldings,
-          partialCoverage: hCov.hasHoldings && !hCov.isComplete,
+          partialCoverage: hCov.hasHoldings && !hCov.isExact,
+          coverageStatus: hCov.coverageStatus,
+          highCoverage: hCov.highCoverage,
+          hasInconsistentTotal: hCov.hasInconsistentTotal,
           disclosedWeightPct: hCov.hasHoldings ? hCov.disclosedWeightPct : null,
+          nonCashWeightPct: hCov.hasHoldings ? hCov.nonCashWeightPct : null,
+          cashWeightPct: hCov.hasHoldings ? hCov.cashWeightPct : null,
+          rawTotalWeightPct: hCov.hasHoldings ? hCov.rawTotalWeightPct : null,
           unknownWeightPct: hCov.hasHoldings ? hCov.unknownWeightPct : null,
+          excessWeightPct: hCov.hasHoldings ? hCov.excessWeightPct : null,
+          roundingTolerancePct: EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT,
           thresholdPct: FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT,
-          exactFullPortfolioAnalyticsAllowed: hCov.isComplete,
+          exactFullPortfolioAnalyticsAllowed: hCov.isExact,
         },
         trailingReturns: cagrMeta.values,
         trailingUnavailableReasons: cagrMeta.unavailableReasons,
@@ -585,9 +598,23 @@ export function buildSingleFundFactsheetCsv(
     `"NAV Validation Window",${csvText(eff.earliestDate && eff.latestDate ? `${eff.earliestDate} to ${eff.latestDate}` : null)}`,
     `"Validated NAV Observations",${eff.validCount}`,
     `"Rejected Payload Diagnostics",${csvText(diag ? `Requested ${diag.requestedSchemeCode}, Returned ${diag.returnedSchemeCode ?? 'null'} (${diag.totalRawCount} raw obs): ${diag.reason}` : 'None')}`,
-    `"Holdings Coverage Status",${csvText(!hCov.hasHoldings ? 'Unavailable' : hCov.isComplete ? 'Complete (>=95%)' : 'Partial Subset (<95% exact overlap suppressed)')}`,
+    `"Holdings Coverage Status",${csvText(
+      !hCov.hasHoldings
+        ? 'Unavailable'
+        : hCov.isExact
+        ? `Complete (~100% within ±${EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT}% tolerance)`
+        : hCov.hasInconsistentTotal
+        ? `Inconsistent Total (${hCov.rawTotalWeightPct}% raw; exact overlap suppressed)`
+        : hCov.highCoverage
+        ? `High-Coverage Partial (${hCov.disclosedWeightPct}% disclosed / ${hCov.unknownWeightPct}% unknown > ±${EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT}% tol.; exact overlap suppressed)`
+        : `Partial Subset (<95%; exact overlap suppressed)`
+    )}`,
     `"Holdings Disclosed (%)",${hCov.hasHoldings ? hCov.disclosedWeightPct : '"Unavailable"'}`,
+    `"Holdings Non-Cash (%)",${hCov.hasHoldings ? hCov.nonCashWeightPct : '"Unavailable"'}`,
+    `"Holdings Classified Cash (%)",${hCov.hasHoldings ? hCov.cashWeightPct : '"Unavailable"'}`,
+    `"Holdings Raw Total (%)",${hCov.hasHoldings ? hCov.rawTotalWeightPct : '"Unavailable"'}`,
     `"Holdings Unknown (%)",${hCov.hasHoldings ? hCov.unknownWeightPct : '"Unavailable"'}`,
+    `"Holdings Exactness Allowed",${csvText(hCov.isExact ? 'Yes' : 'No')}`,
     `"Category",${csvText(fund.category)}`,
     `"Asset Class",${csvText(fund.asset_class)}`,
     `"Fund House",${csvText(fund.fund_house)}`,

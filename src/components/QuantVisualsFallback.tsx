@@ -148,7 +148,7 @@ export const BubbleScatterPlot: React.FC<BubbleScatterProps> = ({ metrics }) => 
 };
 
 /**
- * Dynamic Pairwise ISIN Overlap Heatmap (Coverage-aware; preserves genuine 0.0% ONLY for >=95% complete disclosures)
+ * Dynamic Pairwise ISIN Overlap Heatmap (Coverage-aware; preserves genuine 0.0% ONLY for exact ~100% disclosures within ±0.5% tolerance)
  */
 interface OverlapHeatmapProps {
   available: boolean;
@@ -159,7 +159,17 @@ interface OverlapHeatmapProps {
   observedSubsetMatrix?: (number | null)[][];
   coveragePctByFund?: (number | null)[];
   unknownPctByFund?: (number | null)[];
+  cashPctByFund?: (number | null)[];
+  nonCashPctByFund?: (number | null)[];
+  rawTotalPctByFund?: (number | null)[];
   coverageStatusByFund?: ('complete' | 'partial' | 'unavailable')[];
+  coverageDetailByFund?: (
+    | 'complete'
+    | 'partial_high_coverage'
+    | 'partial_subset'
+    | 'inconsistent_total'
+    | 'unavailable'
+  )[];
 }
 
 export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({
@@ -171,7 +181,11 @@ export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({
   observedSubsetMatrix,
   coveragePctByFund,
   unknownPctByFund,
+  cashPctByFund,
+  nonCashPctByFund,
+  rawTotalPctByFund,
   coverageStatusByFund,
+  coverageDetailByFund,
 }) => {
   const [hoveredCell, setHoveredCell] = useState<{ r: number; c: number } | null>(null);
 
@@ -195,7 +209,7 @@ export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({
       {!exactAvailable && reason && (
         <div className="p-3 rounded-xl bg-amber-950/50 border border-amber-800/70 text-xs text-amber-200 leading-relaxed">
           <span className="font-bold uppercase tracking-wider text-[10px] text-amber-300 block mb-0.5">
-            Partial Holdings Coverage — Exact Overlap Suppressed
+            Partial or Inconsistent Holdings Coverage — Exact Overlap Suppressed
           </span>
           {reason}
         </div>
@@ -228,23 +242,35 @@ export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({
               {names.map((rowName, r) => {
                 const covR = coveragePctByFund?.[r];
                 const unkR = unknownPctByFund?.[r];
+                const cashR = cashPctByFund?.[r];
+                const rawR = rawTotalPctByFund?.[r];
                 const statR = coverageStatusByFund?.[r];
+                const detailR = coverageDetailByFund?.[r];
                 return (
                   <tr key={r}>
                     <td className="p-2.5 text-left font-sans text-slate-300 font-medium border-t border-slate-800">
                       <div className="truncate max-w-[165px]">{rowName}</div>
                       {covR !== null && covR !== undefined && (
                         <div className="text-[10px] font-mono text-slate-500">
-                          {statR === 'partial'
-                            ? `${covR.toFixed(1)}% disclosed · ${unkR?.toFixed(1)}% unknown`
-                            : `${covR.toFixed(1)}% disclosed`}
+                          {detailR === 'inconsistent_total'
+                            ? `Inconsistent total: ${(rawR ?? covR).toFixed(1)}%`
+                            : statR === 'partial'
+                            ? `${covR.toFixed(1)}% disclosed · ${unkR?.toFixed(1)}% unknown${
+                                detailR === 'partial_high_coverage' ? ' (Partial ≥95%)' : ''
+                              }`
+                            : cashR && cashR > 0
+                            ? `${covR.toFixed(1)}% disclosed (${cashR.toFixed(1)}% cash)`
+                            : `${covR.toFixed(1)}% disclosed (Exact)`}
                         </div>
                       )}
                     </td>
                     {matrix[r].map((val, c) => {
                       const isDiag = r === c;
                       const statC = coverageStatusByFund?.[c];
+                      const detailC = coverageDetailByFund?.[c];
                       const isPartialPair = statR === 'partial' || statC === 'partial';
+                      const isInconsistentPair =
+                        detailR === 'inconsistent_total' || detailC === 'inconsistent_total';
                       const subsetVal = observedSubsetMatrix?.[r]?.[c];
 
                       const bgStyle =
@@ -267,6 +293,11 @@ export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({
                         >
                           {val !== null ? (
                             <span>{val.toFixed(1)}%</span>
+                          ) : isInconsistentPair ? (
+                            <div className="space-y-0.5">
+                              <div className="text-[11px] text-rose-300 font-semibold">Inconsistent</div>
+                              <div className="text-[9px] text-slate-500">Totals unreconciled</div>
+                            </div>
                           ) : isPartialPair && !isDiag && subsetVal !== null && subsetVal !== undefined ? (
                             <div className="space-y-0.5">
                               <div className="text-[11px] text-amber-300 font-semibold">Unavailable</div>
@@ -294,7 +325,7 @@ export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({
 
         <div className="flex flex-wrap items-center justify-between text-xs text-slate-400 mt-3 pt-2 border-t border-slate-800/70 gap-2">
           <div>
-            <span>Color legend (exact ≥95% coverage only): </span>
+            <span>Color legend (exact 100% coverage within ±0.5% tolerance only): </span>
             <span className="text-emerald-400 font-medium mr-3">&lt; 25% Low Overlap</span>
             <span className="text-amber-400 font-medium mr-3">25%–40% Moderate</span>
             <span className="text-rose-400 font-medium">&gt; 40% Heavy Redundancy</span>
@@ -318,15 +349,26 @@ export const OverlapHeatmap: React.FC<OverlapHeatmapProps> = ({
 
       {hasPartialFunds && (
         <div className="p-3 bg-slate-900/70 border border-slate-800 rounded-xl text-[11px] text-slate-400 flex flex-wrap gap-3">
-          <span className="font-semibold text-amber-300">Disclosed Coverage vs Unknown Portfolio:</span>
-          {names.map((nm, idx) =>
-            coveragePctByFund?.[idx] !== null && coveragePctByFund?.[idx] !== undefined ? (
+          <span className="font-semibold text-amber-300">Disclosed Securities + Classified Cash vs Unknown Portfolio:</span>
+          {names.map((nm, idx) => {
+            const cov = coveragePctByFund?.[idx];
+            if (cov === null || cov === undefined) return null;
+            const nonCash = nonCashPctByFund?.[idx] ?? cov;
+            const cash = cashPctByFund?.[idx] ?? 0;
+            const unk = unknownPctByFund?.[idx] ?? 0;
+            const raw = rawTotalPctByFund?.[idx] ?? cov;
+            const det = coverageDetailByFund?.[idx];
+            return (
               <span key={idx} className="font-mono">
-                {nm.split(' ').slice(0, 2).join(' ')}: {coveragePctByFund[idx]!.toFixed(2)}% disclosed /{' '}
-                {(unknownPctByFund?.[idx] ?? 0).toFixed(2)}% unknown
+                {nm.split(' ').slice(0, 2).join(' ')}:{' '}
+                {det === 'inconsistent_total'
+                  ? `Inconsistent raw total ${raw.toFixed(2)}%`
+                  : `${cov.toFixed(2)}% disclosed (${nonCash.toFixed(2)}% sec + ${cash.toFixed(2)}% cash) / ${unk.toFixed(2)}% unknown${
+                      det === 'partial_high_coverage' ? ' [High-Cov Partial]' : ''
+                    }`}
               </span>
-            ) : null
-          )}
+            );
+          })}
         </div>
       )}
     </div>

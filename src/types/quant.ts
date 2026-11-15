@@ -164,8 +164,12 @@ export interface HoldingsStatus {
   source: string | null;
   partialCoverage: boolean;
   disclosedWeightPct?: number | null;
+  nonCashWeightPct?: number | null;
+  cashWeightPct?: number | null;
+  rawTotalWeightPct?: number | null;
   unknownWeightPct?: number | null;
   coverageThresholdPct?: number;
+  coverageStatus?: 'complete' | 'partial_high_coverage' | 'partial_subset' | 'inconsistent_total' | 'unavailable';
   reason: string | null;
 }
 
@@ -239,12 +243,24 @@ export interface TrailingCagrResult {
   unavailableReasons: Record<string, string>;
 }
 
+export type HoldingsCoverageDetailStatus =
+  | 'complete'
+  | 'partial_high_coverage'
+  | 'partial_subset'
+  | 'inconsistent_total'
+  | 'unavailable';
+
 export interface PairwiseOverlapMeta {
   exactOverlap: number | null;
   observedSubsetOverlap: number | null;
   coverageA: number | null;
   coverageB: number | null;
-  coverageStatus: 'complete' | 'partial_subset' | 'unavailable';
+  unknownA?: number | null;
+  unknownB?: number | null;
+  cashA?: number | null;
+  cashB?: number | null;
+  coverageStatus: 'complete' | 'partial_subset' | 'inconsistent_total' | 'unavailable';
+  coverageLabel?: string;
   reason: string | null;
 }
 
@@ -257,7 +273,11 @@ export interface OverlapMatrixResult {
   observedSubsetMatrix: (number | null)[][];
   coveragePctByFund: (number | null)[];
   unknownPctByFund: (number | null)[];
+  cashPctByFund?: (number | null)[];
+  nonCashPctByFund?: (number | null)[];
+  rawTotalPctByFund?: (number | null)[];
   coverageStatusByFund: ('complete' | 'partial' | 'unavailable')[];
+  coverageDetailByFund?: HoldingsCoverageDetailStatus[];
 }
 
 export interface MarketCapExposureResult {
@@ -266,6 +286,9 @@ export interface MarketCapExposureResult {
   isPartialSubset: boolean;
   coveredWeightPct: number;
   unknownWeightPct: number;
+  cashWeightPct?: number;
+  nonCashWeightPct?: number;
+  hasInconsistentTotal?: boolean;
   reason: string | null;
   segments: { segment: string; weight: number }[];
 }
@@ -276,6 +299,9 @@ export interface SectorExposureResult {
   isPartialSubset: boolean;
   coveredWeightPct: number;
   unknownWeightPct: number;
+  cashWeightPct?: number;
+  nonCashWeightPct?: number;
+  hasInconsistentTotal?: boolean;
   reason: string | null;
   sectors: { sector: string; weight: number }[];
 }

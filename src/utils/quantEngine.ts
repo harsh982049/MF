@@ -3,6 +3,7 @@ import {
   CorporateActionBreak,
   DurationSensitivityResult,
   FundHolding,
+  HoldingsCoverageDetailStatus,
   LiquidityStressResult,
   MarketCapExposureResult,
   NavPoint,
@@ -865,13 +866,24 @@ export function computeReturnCorrelationMatrix(
   };
 }
 
-export const FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT = 95.0;
+export const EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT = 0.5;
+export const HIGH_HOLDINGS_COVERAGE_THRESHOLD_PCT = 95.0;
+export const FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT = 100.0 - EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT;
 
 export interface HoldingsCoverageSummary {
   hasHoldings: boolean;
+  rawTotalWeightPct: number;
   disclosedWeightPct: number;
+  nonCashWeightPct: number;
+  cashWeightPct: number;
   unknownWeightPct: number;
+  excessWeightPct: number;
+  highCoverage: boolean;
+  hasInconsistentTotal: boolean;
+  isExact: boolean;
   isComplete: boolean;
+  coverageStatus: HoldingsCoverageDetailStatus;
+  reason: string | null;
 }
 
 export function computeHoldingsCoverage(
@@ -881,34 +893,114 @@ export function computeHoldingsCoverage(
   if (!holdings || holdings.length === 0) {
     return {
       hasHoldings: false,
+      rawTotalWeightPct: 0,
       disclosedWeightPct: 0,
+      nonCashWeightPct: 0,
+      cashWeightPct: 0,
       unknownWeightPct: 100,
+      excessWeightPct: 0,
+      highCoverage: false,
+      hasInconsistentTotal: false,
+      isExact: false,
       isComplete: false,
+      coverageStatus: 'unavailable',
+      reason: 'Unavailable: Security-level holdings disclosure not ingested.',
     };
   }
 
-  const rawSum = holdings.reduce(
-    (acc, h) => acc + (h && Number.isFinite(h.weight) && h.weight > 0 ? h.weight : 0),
-    0
+  const hasInvalidWeight = holdings.some((h) => !h || !Number.isFinite(h.weight) || h.weight < 0);
+  const positiveHoldings = holdings.filter(
+    (h) => h && Number.isFinite(h.weight) && h.weight > 0
   );
+  const rawSum = positiveHoldings.reduce((acc, h) => acc + h.weight, 0);
+
+  if (rawSum <= 0 && !hasInvalidWeight) {
+    return {
+      hasHoldings: false,
+      rawTotalWeightPct: 0,
+      disclosedWeightPct: 0,
+      nonCashWeightPct: 0,
+      cashWeightPct: 0,
+      unknownWeightPct: 100,
+      excessWeightPct: 0,
+      highCoverage: false,
+      hasInconsistentTotal: false,
+      isExact: false,
+      isComplete: false,
+      coverageStatus: 'unavailable',
+      reason: 'Unavailable: Holdings weights sum to zero.',
+    };
+  }
+
+  const rawCashSum = positiveHoldings
+    .filter((h) => isCashEquivalentHolding(h))
+    .reduce((acc, h) => acc + h.weight, 0);
+  const rawNonCashSum = Math.max(0, rawSum - rawCashSum);
+
+  const rawTotalWeightPct = Number(rawSum.toFixed(2));
   const disclosedWeightPct = Number(Math.min(100, Math.max(0, rawSum)).toFixed(2));
-  const unknownWeightPct = Number(Math.max(0, 100 - disclosedWeightPct).toFixed(2));
-  const isComplete = !partialCoverageFlag && disclosedWeightPct >= FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT;
+  const cashWeightPct = Number(rawCashSum.toFixed(2));
+  const nonCashWeightPct = Number(rawNonCashSum.toFixed(2));
+  const unknownWeightPct = Number(Math.max(0, 100 - rawSum).toFixed(2));
+  const excessWeightPct = Number(Math.max(0, rawSum - 100).toFixed(2));
+
+  const overMax = rawSum > 100 + EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT;
+  const hasInconsistentTotal = hasInvalidWeight || overMax;
+  const withinRoundingTolerance =
+    Math.abs(100 - rawSum) <= EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT;
+  const highCoverage =
+    !hasInconsistentTotal && rawSum >= HIGH_HOLDINGS_COVERAGE_THRESHOLD_PCT;
+  const isExact =
+    !partialCoverageFlag && !hasInconsistentTotal && withinRoundingTolerance;
+
+  let coverageStatus: HoldingsCoverageDetailStatus;
+  let reason: string | null = null;
+
+  if (hasInconsistentTotal) {
+    coverageStatus = 'inconsistent_total';
+    reason = hasInvalidWeight
+      ? `Inconsistent holdings weights detected (negative or non-finite holding weight; raw sum ${rawTotalWeightPct.toFixed(2)}%). Exact full-portfolio claims suppressed.`
+      : `Inconsistent holdings total: disclosed weights sum to ${rawTotalWeightPct.toFixed(2)}% (+${excessWeightPct.toFixed(2)}% above 100% ± ${EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT}% tolerance). Exact full-portfolio claims suppressed.`;
+  } else if (isExact) {
+    coverageStatus = 'complete';
+    reason = null;
+  } else if (highCoverage) {
+    coverageStatus = 'partial_high_coverage';
+    reason =
+      partialCoverageFlag && withinRoundingTolerance
+        ? `Holdings flagged as partial coverage (${rawTotalWeightPct.toFixed(2)}% total: ${nonCashWeightPct.toFixed(2)}% non-cash + ${cashWeightPct.toFixed(2)}% classified cash). Exact full-portfolio overlap suppressed.`
+        : `High coverage (${disclosedWeightPct.toFixed(2)}% disclosed = ${nonCashWeightPct.toFixed(2)}% non-cash + ${cashWeightPct.toFixed(2)}% classified cash) still leaves ${unknownWeightPct.toFixed(2)}% unknown/undisclosed (>±${EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT}% rounding tolerance). Partial only; exact full-portfolio overlap suppressed.`;
+  } else {
+    coverageStatus = 'partial_subset';
+    reason = `Partial holdings coverage: ${disclosedWeightPct.toFixed(2)}% disclosed (${nonCashWeightPct.toFixed(2)}% non-cash + ${cashWeightPct.toFixed(2)}% classified cash); ${unknownWeightPct.toFixed(2)}% unknown/undisclosed. Exact full-portfolio overlap suppressed.`;
+  }
 
   return {
     hasHoldings: true,
+    rawTotalWeightPct,
     disclosedWeightPct,
+    nonCashWeightPct,
+    cashWeightPct,
     unknownWeightPct,
-    isComplete,
+    excessWeightPct,
+    highCoverage,
+    hasInconsistentTotal,
+    isExact,
+    isComplete: isExact,
+    coverageStatus,
+    reason,
   };
 }
 
 /**
- * Pairwise stock-level portfolio overlap with explicit coverage metadata.
- * - Requires >= 95% portfolio coverage (and !partialCoverage) for an exact scheme overlap.
- * - Preserves genuine numeric 0 for complete disjoint equity portfolios.
- * - Suppresses exactOverlap (null) when either fund is partial, while optionally exposing
- *   observedSubsetOverlap separately with explicit coverage labels.
+ * Pairwise stock-level portfolio overlap with explicit coverage & exactness metadata.
+ * - Requires ~100% portfolio coverage within ±0.5% rounding tolerance (no undisclosed residual,
+ *   no inconsistent >100.5% or negative totals, and !partialCoverage) for an exact scheme overlap.
+ * - Expressly classified cash (CASH_EQUIV/TREPS) is excluded from stock overlap while still counting
+ *   toward disclosed portfolio coverage (never conflated with undisclosed assets).
+ * - Preserves genuine numeric 0 for complete disjoint portfolios.
+ * - Suppresses exactOverlap (null) whenever either portfolio is partial or inconsistent, while
+ *   reporting observedSubsetOverlap separately (or null if weights are inconsistent).
  */
 export function computePairwiseOverlapWithMeta(
   holdingsA: FundHolding[] | null | undefined,
@@ -926,13 +1018,41 @@ export function computePairwiseOverlapWithMeta(
       observedSubsetOverlap: null,
       coverageA: covA.hasHoldings ? covA.disclosedWeightPct : null,
       coverageB: covB.hasHoldings ? covB.disclosedWeightPct : null,
+      unknownA: covA.hasHoldings ? covA.unknownWeightPct : 100,
+      unknownB: covB.hasHoldings ? covB.unknownWeightPct : 100,
+      cashA: covA.hasHoldings ? covA.cashWeightPct : null,
+      cashB: covB.hasHoldings ? covB.cashWeightPct : null,
       coverageStatus: 'unavailable',
+      coverageLabel: 'Unavailable',
       reason: 'Unavailable: Verified security-level portfolio holdings are required for both schemes.',
     };
   }
 
-  const validA = holdingsA!.filter((h) => !excludeCash || !isCashEquivalentHolding(h));
-  const validB = holdingsB!.filter((h) => !excludeCash || !isCashEquivalentHolding(h));
+  if (covA.hasInconsistentTotal || covB.hasInconsistentTotal) {
+    const issueReasons = [covA.hasInconsistentTotal ? covA.reason : null, covB.hasInconsistentTotal ? covB.reason : null]
+      .filter(Boolean)
+      .join(' ');
+    return {
+      exactOverlap: null,
+      observedSubsetOverlap: null,
+      coverageA: covA.rawTotalWeightPct,
+      coverageB: covB.rawTotalWeightPct,
+      unknownA: covA.unknownWeightPct,
+      unknownB: covB.unknownWeightPct,
+      cashA: covA.cashWeightPct,
+      cashB: covB.cashWeightPct,
+      coverageStatus: 'inconsistent_total',
+      coverageLabel: 'Inconsistent Totals (Partial / Invalid)',
+      reason: issueReasons || 'Inconsistent portfolio totals prevent holdings overlap calculation.',
+    };
+  }
+
+  const validA = holdingsA!.filter(
+    (h) => h && Number.isFinite(h.weight) && h.weight > 0 && (!excludeCash || !isCashEquivalentHolding(h))
+  );
+  const validB = holdingsB!.filter(
+    (h) => h && Number.isFinite(h.weight) && h.weight > 0 && (!excludeCash || !isCashEquivalentHolding(h))
+  );
 
   if (!validA.length || !validB.length) {
     return {
@@ -940,8 +1060,13 @@ export function computePairwiseOverlapWithMeta(
       observedSubsetOverlap: null,
       coverageA: covA.disclosedWeightPct,
       coverageB: covB.disclosedWeightPct,
+      unknownA: covA.unknownWeightPct,
+      unknownB: covB.unknownWeightPct,
+      cashA: covA.cashWeightPct,
+      cashB: covB.cashWeightPct,
       coverageStatus: 'unavailable',
-      reason: 'Unavailable: Non-cash equity holdings are missing for one or both schemes.',
+      coverageLabel: 'Unavailable',
+      reason: 'Unavailable: Non-cash security holdings are missing for one or both schemes.',
     };
   }
 
@@ -966,14 +1091,22 @@ export function computePairwiseOverlapWithMeta(
   }
   const roundedOverlap = Number(overlap.toFixed(2));
 
-  if (!covA.isComplete || !covB.isComplete) {
+  if (!covA.isExact || !covB.isExact) {
+    const eitherHighCov = covA.highCoverage && covB.highCoverage;
     return {
       exactOverlap: null,
       observedSubsetOverlap: roundedOverlap,
       coverageA: covA.disclosedWeightPct,
       coverageB: covB.disclosedWeightPct,
+      unknownA: covA.unknownWeightPct,
+      unknownB: covB.unknownWeightPct,
+      cashA: covA.cashWeightPct,
+      cashB: covB.cashWeightPct,
       coverageStatus: 'partial_subset',
-      reason: `Partial holdings coverage (${covA.disclosedWeightPct.toFixed(2)}% vs ${covB.disclosedWeightPct.toFixed(2)}%; <${FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT}% threshold). Exact full-portfolio overlap suppressed; observed subset overlap is ${roundedOverlap.toFixed(2)}%.`,
+      coverageLabel: eitherHighCov
+        ? 'Partial (High Coverage ≥95%, Undisclosed Residual > ±0.5%)'
+        : 'Partial Subset',
+      reason: `Partial holdings coverage (${covA.disclosedWeightPct.toFixed(2)}% disclosed / ${covA.unknownWeightPct.toFixed(2)}% unknown vs ${covB.disclosedWeightPct.toFixed(2)}% disclosed / ${covB.unknownWeightPct.toFixed(2)}% unknown; undisclosed residual exceeds ±${EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT}% rounding tolerance). Exact full-portfolio overlap suppressed; observed subset overlap is ${roundedOverlap.toFixed(2)}%.`,
     };
   }
 
@@ -982,14 +1115,19 @@ export function computePairwiseOverlapWithMeta(
     observedSubsetOverlap: roundedOverlap,
     coverageA: covA.disclosedWeightPct,
     coverageB: covB.disclosedWeightPct,
+    unknownA: covA.unknownWeightPct,
+    unknownB: covB.unknownWeightPct,
+    cashA: covA.cashWeightPct,
+    cashB: covB.cashWeightPct,
     coverageStatus: 'complete',
+    coverageLabel: 'Complete / Exact (Within ±0.5% Tolerance)',
     reason: null,
   };
 }
 
 /**
  * Pairwise stock-level portfolio overlap between two funds.
- * Returns null when either fund lacks >= 95% complete non-cash holdings; preserves genuine 0 on complete disjoint portfolios.
+ * Returns null when either fund lacks exact complete coverage (100% ±0.5%); preserves genuine 0 on complete disjoint portfolios.
  */
 export function computePairwiseOverlap(
   holdingsA: FundHolding[] | null | undefined,
@@ -1023,8 +1161,14 @@ export function computeOverlapMatrix(
   const coverages = funds.map((f) => computeHoldingsCoverage(f.holdings, Boolean(f.partialCoverage)));
   const coveragePctByFund = coverages.map((c) => (c.hasHoldings ? c.disclosedWeightPct : null));
   const unknownPctByFund = coverages.map((c) => (c.hasHoldings ? c.unknownWeightPct : null));
+  const cashPctByFund = coverages.map((c) => (c.hasHoldings ? c.cashWeightPct : null));
+  const nonCashPctByFund = coverages.map((c) => (c.hasHoldings ? c.nonCashWeightPct : null));
+  const rawTotalPctByFund = coverages.map((c) => (c.hasHoldings ? c.rawTotalWeightPct : null));
   const coverageStatusByFund: ('complete' | 'partial' | 'unavailable')[] = coverages.map((c) =>
-    !c.hasHoldings ? 'unavailable' : c.isComplete ? 'complete' : 'partial'
+    !c.hasHoldings ? 'unavailable' : c.isExact ? 'complete' : 'partial'
+  );
+  const coverageDetailByFund: HoldingsCoverageDetailStatus[] = coverages.map(
+    (c) => c.coverageStatus
   );
 
   let anyHoldings = false;
@@ -1035,11 +1179,11 @@ export function computeOverlapMatrix(
     if (covI.hasHoldings) anyHoldings = true;
     for (let j = 0; j < n; j++) {
       if (i === j) {
-        if (covI.isComplete) {
+        if (covI.isExact) {
           matrix[i][j] = 100.0;
           observedSubsetMatrix[i][j] = 100.0;
           if (n === 1) exactAvailable = true;
-        } else if (covI.hasHoldings) {
+        } else if (covI.hasHoldings && !covI.hasInconsistentTotal) {
           matrix[i][j] = null;
           observedSubsetMatrix[i][j] = Number(covI.disclosedWeightPct.toFixed(1));
         }
@@ -1067,14 +1211,18 @@ export function computeOverlapMatrix(
     reason = 'Unavailable: None of the selected schemes have verified portfolio holdings.';
   } else if (!exactAvailable) {
     const partialLabels = funds
-      .map((f, i) =>
-        coverages[i].hasHoldings
-          ? `${f.name.split(' ').slice(0, 2).join(' ')}: ${coverages[i].disclosedWeightPct.toFixed(2)}% disclosed / ${coverages[i].unknownWeightPct.toFixed(2)}% unknown`
-          : null
-      )
+      .map((f, i) => {
+        const cov = coverages[i];
+        if (!cov.hasHoldings) return null;
+        const shortName = f.name.split(' ').slice(0, 2).join(' ');
+        if (cov.hasInconsistentTotal) {
+          return `${shortName}: ${cov.rawTotalWeightPct.toFixed(2)}% raw total (inconsistent weights)`;
+        }
+        return `${shortName}: ${cov.disclosedWeightPct.toFixed(2)}% disclosed (${cov.nonCashWeightPct.toFixed(2)}% securities + ${cov.cashWeightPct.toFixed(2)}% cash) / ${cov.unknownWeightPct.toFixed(2)}% unknown`;
+      })
       .filter(Boolean)
       .join('; ');
-    reason = `Exact full-portfolio overlap suppressed because disclosed holdings are below ${FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT}% (${partialLabels}). Observed subset overlap cannot be presented as exact scheme overlap.`;
+    reason = `Exact full-portfolio overlap suppressed: complete disclosure within ±${EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT}% of 100% is required (${partialLabels}). High-coverage or partial subsets cannot be presented as exact scheme overlap.`;
   }
 
   return {
@@ -1086,7 +1234,11 @@ export function computeOverlapMatrix(
     observedSubsetMatrix,
     coveragePctByFund,
     unknownPctByFund,
+    cashPctByFund,
+    nonCashPctByFund,
+    rawTotalPctByFund,
     coverageStatusByFund,
+    coverageDetailByFund,
   };
 }
 
@@ -1094,23 +1246,34 @@ export function aggregateMarketCapExposure(
   funds: { holdings: FundHolding[] | null | undefined; partialCoverage?: boolean }[],
   weights?: number[]
 ): MarketCapExposureResult {
-  const validEntries = funds
-    .map((f, idx) => ({ f, origW: weights ? weights[idx] : 1 }))
-    .filter((entry) => entry.f.holdings && entry.f.holdings.length > 0 && entry.origW > 0);
+  const activeEntries = funds
+    .map((f, idx) => {
+      const w = weights ? weights[idx] : 1;
+      return {
+        f,
+        origW: Number.isFinite(w) && w > 0 ? w : 0,
+        cov: computeHoldingsCoverage(f.holdings, Boolean(f.partialCoverage)),
+      };
+    })
+    .filter((entry) => entry.origW > 0);
 
-  if (validEntries.length === 0) {
+  const anyHoldings = activeEntries.some((entry) => entry.cov.hasHoldings);
+  if (activeEntries.length === 0 || !anyHoldings) {
     return {
       available: false,
       exactAvailable: false,
       isPartialSubset: false,
       coveredWeightPct: 0,
       unknownWeightPct: 100,
+      cashWeightPct: 0,
+      nonCashWeightPct: 0,
+      hasInconsistentTotal: false,
       reason: 'Unavailable: Verified security-level holdings are required for market-cap look-through.',
       segments: [],
     };
   }
 
-  const totalOrigW = validEntries.reduce((acc, e) => acc + e.origW, 0) || 1;
+  const totalOrigW = activeEntries.reduce((acc, e) => acc + e.origW, 0) || 1;
   const totals: Record<string, number> = {
     'Large Cap': 0,
     'Mid Cap': 0,
@@ -1120,17 +1283,33 @@ export function aggregateMarketCapExposure(
   };
 
   let coveredRaw = 0;
-  let allComplete = true;
+  let unknownRaw = 0;
+  let cashRaw = 0;
+  let nonCashRaw = 0;
+  let allExact = true;
+  let anyInconsistentTotal = false;
 
-  validEntries.forEach(({ f, origW }) => {
+  activeEntries.forEach(({ f, origW, cov }) => {
     const fundWeight = origW / totalOrigW;
-    const cov = computeHoldingsCoverage(f.holdings, Boolean(f.partialCoverage));
-    if (!cov.isComplete) allComplete = false;
+    if (!cov.hasHoldings) {
+      allExact = false;
+      unknownRaw += fundWeight * 100;
+      return;
+    }
+
+    if (!cov.isExact) allExact = false;
+    if (cov.hasInconsistentTotal) anyInconsistentTotal = true;
+
+    cashRaw += fundWeight * cov.cashWeightPct;
+    nonCashRaw += fundWeight * cov.nonCashWeightPct;
+    coveredRaw += fundWeight * cov.disclosedWeightPct;
+    unknownRaw += fundWeight * cov.unknownWeightPct;
 
     f.holdings!.forEach((h) => {
-      const contrib = fundWeight * h.weight;
-      totals[h.mcap] = (totals[h.mcap] || 0) + contrib;
-      coveredRaw += contrib;
+      if (h && Number.isFinite(h.weight) && h.weight > 0) {
+        const contrib = fundWeight * h.weight;
+        totals[h.mcap] = (totals[h.mcap] || 0) + contrib;
+      }
     });
   });
 
@@ -1141,17 +1320,25 @@ export function aggregateMarketCapExposure(
       isPartialSubset: false,
       coveredWeightPct: 0,
       unknownWeightPct: 100,
+      cashWeightPct: 0,
+      nonCashWeightPct: 0,
+      hasInconsistentTotal: anyInconsistentTotal,
       reason: 'Unavailable: Holdings weights sum to zero.',
       segments: [],
     };
   }
 
-  const coveredWeightPct = Number(Math.min(100, coveredRaw).toFixed(2));
-  const unknownWeightPct = Number(Math.max(0, 100 - coveredWeightPct).toFixed(2));
-  const exactAvailable = allComplete && unknownWeightPct < 0.5;
+  const coveredWeightPct = Number(Math.min(100, Math.max(0, coveredRaw)).toFixed(2));
+  const unknownWeightPct = Number(Math.min(100, Math.max(0, unknownRaw)).toFixed(2));
+  const cashWeightPct = Number(Math.max(0, cashRaw).toFixed(2));
+  const nonCashWeightPct = Number(Math.max(0, nonCashRaw).toFixed(2));
+  const exactAvailable =
+    allExact &&
+    !anyInconsistentTotal &&
+    unknownWeightPct <= EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT;
   const isPartialSubset = !exactAvailable;
 
-  // Preserve exact portfolio share relative to 100% NAV — NEVER re-normalize a 65% subset to 100%!
+  // Preserve exact portfolio share relative to 100% NAV — NEVER drop missing-holdings funds or re-normalize a partial subset to 100%!
   const segments = Object.entries(totals).map(([segment, val]) => ({
     segment,
     weight: Number(val.toFixed(2)),
@@ -1170,8 +1357,13 @@ export function aggregateMarketCapExposure(
     isPartialSubset,
     coveredWeightPct,
     unknownWeightPct,
+    cashWeightPct,
+    nonCashWeightPct,
+    hasInconsistentTotal: anyInconsistentTotal,
     reason: isPartialSubset
-      ? `Covered subset only: ${coveredWeightPct.toFixed(2)}% disclosed; ${unknownWeightPct.toFixed(2)}% Unknown / Undisclosed (<${FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT}% full-portfolio threshold).`
+      ? anyInconsistentTotal
+        ? `Inconsistent / partial holdings coverage: ${coveredWeightPct.toFixed(2)}% disclosed (${nonCashWeightPct.toFixed(2)}% securities + ${cashWeightPct.toFixed(2)}% classified cash); ${unknownWeightPct.toFixed(2)}% Unknown / Undisclosed.`
+        : `Covered subset only: ${coveredWeightPct.toFixed(2)}% disclosed (${nonCashWeightPct.toFixed(2)}% securities + ${cashWeightPct.toFixed(2)}% classified cash); ${unknownWeightPct.toFixed(2)}% Unknown / Undisclosed (requires 100% within ±${EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT}% tolerance across all selected weights).`
       : null,
     segments,
   };
@@ -1181,36 +1373,63 @@ export function aggregateSectorExposure(
   funds: { holdings: FundHolding[] | null | undefined; partialCoverage?: boolean }[],
   weights?: number[]
 ): SectorExposureResult {
-  const validEntries = funds
-    .map((f, idx) => ({ f, origW: weights ? weights[idx] : 1 }))
-    .filter((entry) => entry.f.holdings && entry.f.holdings.length > 0 && entry.origW > 0);
+  const activeEntries = funds
+    .map((f, idx) => {
+      const w = weights ? weights[idx] : 1;
+      return {
+        f,
+        origW: Number.isFinite(w) && w > 0 ? w : 0,
+        cov: computeHoldingsCoverage(f.holdings, Boolean(f.partialCoverage)),
+      };
+    })
+    .filter((entry) => entry.origW > 0);
 
-  if (validEntries.length === 0) {
+  const anyHoldings = activeEntries.some((entry) => entry.cov.hasHoldings);
+  if (activeEntries.length === 0 || !anyHoldings) {
     return {
       available: false,
       exactAvailable: false,
       isPartialSubset: false,
       coveredWeightPct: 0,
       unknownWeightPct: 100,
+      cashWeightPct: 0,
+      nonCashWeightPct: 0,
+      hasInconsistentTotal: false,
       reason: 'Unavailable: Verified security-level holdings are required for sector exposure.',
       sectors: [],
     };
   }
 
-  const totalOrigW = validEntries.reduce((acc, e) => acc + e.origW, 0) || 1;
+  const totalOrigW = activeEntries.reduce((acc, e) => acc + e.origW, 0) || 1;
   const totals: Record<string, number> = {};
   let coveredRaw = 0;
-  let allComplete = true;
+  let unknownRaw = 0;
+  let cashRaw = 0;
+  let nonCashRaw = 0;
+  let allExact = true;
+  let anyInconsistentTotal = false;
 
-  validEntries.forEach(({ f, origW }) => {
+  activeEntries.forEach(({ f, origW, cov }) => {
     const fundWeight = origW / totalOrigW;
-    const cov = computeHoldingsCoverage(f.holdings, Boolean(f.partialCoverage));
-    if (!cov.isComplete) allComplete = false;
+    if (!cov.hasHoldings) {
+      allExact = false;
+      unknownRaw += fundWeight * 100;
+      return;
+    }
+
+    if (!cov.isExact) allExact = false;
+    if (cov.hasInconsistentTotal) anyInconsistentTotal = true;
+
+    cashRaw += fundWeight * cov.cashWeightPct;
+    nonCashRaw += fundWeight * cov.nonCashWeightPct;
+    coveredRaw += fundWeight * cov.disclosedWeightPct;
+    unknownRaw += fundWeight * cov.unknownWeightPct;
 
     f.holdings!.forEach((h) => {
-      const contrib = fundWeight * h.weight;
-      totals[h.sector] = (totals[h.sector] || 0) + contrib;
-      coveredRaw += contrib;
+      if (h && Number.isFinite(h.weight) && h.weight > 0) {
+        const contrib = fundWeight * h.weight;
+        totals[h.sector] = (totals[h.sector] || 0) + contrib;
+      }
     });
   });
 
@@ -1221,17 +1440,25 @@ export function aggregateSectorExposure(
       isPartialSubset: false,
       coveredWeightPct: 0,
       unknownWeightPct: 100,
+      cashWeightPct: 0,
+      nonCashWeightPct: 0,
+      hasInconsistentTotal: anyInconsistentTotal,
       reason: 'Unavailable: Sector weights sum to zero.',
       sectors: [],
     };
   }
 
-  const coveredWeightPct = Number(Math.min(100, coveredRaw).toFixed(2));
-  const unknownWeightPct = Number(Math.max(0, 100 - coveredWeightPct).toFixed(2));
-  const exactAvailable = allComplete && unknownWeightPct < 0.5;
+  const coveredWeightPct = Number(Math.min(100, Math.max(0, coveredRaw)).toFixed(2));
+  const unknownWeightPct = Number(Math.min(100, Math.max(0, unknownRaw)).toFixed(2));
+  const cashWeightPct = Number(Math.max(0, cashRaw).toFixed(2));
+  const nonCashWeightPct = Number(Math.max(0, nonCashRaw).toFixed(2));
+  const exactAvailable =
+    allExact &&
+    !anyInconsistentTotal &&
+    unknownWeightPct <= EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT;
   const isPartialSubset = !exactAvailable;
 
-  // Keep true weight against 100% AUM and explicitly represent Unknown / Undisclosed share
+  // Keep true weight against 100% selected portfolio denominator and explicitly represent Unknown / Undisclosed share
   const sectors = Object.entries(totals)
     .map(([sector, val]) => ({
       sector,
@@ -1252,8 +1479,13 @@ export function aggregateSectorExposure(
     isPartialSubset,
     coveredWeightPct,
     unknownWeightPct,
+    cashWeightPct,
+    nonCashWeightPct,
+    hasInconsistentTotal: anyInconsistentTotal,
     reason: isPartialSubset
-      ? `Covered subset only: ${coveredWeightPct.toFixed(2)}% disclosed; ${unknownWeightPct.toFixed(2)}% Unknown / Undisclosed (<${FULL_HOLDINGS_COVERAGE_THRESHOLD_PCT}% full-portfolio threshold).`
+      ? anyInconsistentTotal
+        ? `Inconsistent / partial holdings coverage: ${coveredWeightPct.toFixed(2)}% disclosed (${nonCashWeightPct.toFixed(2)}% securities + ${cashWeightPct.toFixed(2)}% classified cash); ${unknownWeightPct.toFixed(2)}% Unknown / Undisclosed.`
+        : `Covered subset only: ${coveredWeightPct.toFixed(2)}% disclosed (${nonCashWeightPct.toFixed(2)}% securities + ${cashWeightPct.toFixed(2)}% classified cash); ${unknownWeightPct.toFixed(2)}% Unknown / Undisclosed (requires 100% within ±${EXACT_HOLDINGS_ROUNDING_TOLERANCE_PCT}% tolerance across all selected weights).`
       : null,
     sectors,
   };

@@ -180,7 +180,7 @@ export function classifyAndBuildFundMeta(
       partialCoverage: false,
       disclosedWeightPct: null,
       unknownWeightPct: null,
-      coverageThresholdPct: 95,
+      coverageThresholdPct: 100,
       reason:
         'Unavailable: Monthly AMC security-level portfolio disclosure has not been ingested for this discovered scheme (Batch 5).',
     },

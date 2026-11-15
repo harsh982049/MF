@@ -773,6 +773,179 @@ describe('Batch 1 Regression Suite (MF-002, MF-006, MF-008, MF-007 & Invariants)
       assert.equal(mat.matrix[1][0], 0);
       assert.equal(mat.matrix[0][0], 100);
     });
+
+    it('separates >=95% high coverage from exactness when undisclosed residual exceeds tolerance, and propagates to exports', () => {
+      const holdings95A: FundHolding[] = [
+        { isin: 'INE101A01001', name: 'Alpha Tech', sector: 'Technology', mcap: 'Large Cap', weight: 95, adtv_cr: 120 },
+      ];
+      const holdings95B: FundHolding[] = [
+        { isin: 'INE202B01001', name: 'Beta Bank', sector: 'Financial Services', mcap: 'Large Cap', weight: 95, adtv_cr: 120 },
+      ];
+
+      const covA = computeHoldingsCoverage(holdings95A, false);
+      const covB = computeHoldingsCoverage(holdings95B, false);
+      assert.equal(covA.disclosedWeightPct, 95);
+      assert.equal(covA.unknownWeightPct, 5);
+      assert.equal(covA.highCoverage, true);
+      assert.equal(covA.isExact, false);
+      assert.equal(covA.isComplete, false);
+      assert.equal(covA.coverageStatus, 'partial_high_coverage');
+      assert.equal(covB.unknownWeightPct, 5);
+
+      const pair = computePairwiseOverlapWithMeta(holdings95A, holdings95B, true, false, false);
+      assert.equal(pair.exactOverlap, null);
+      assert.equal(pair.observedSubsetOverlap, 0);
+      assert.equal(pair.coverageStatus, 'partial_subset');
+      assert.equal(pair.unknownA, 5);
+      assert.equal(pair.unknownB, 5);
+      assert.match(pair.coverageLabel || '', /Partial/i);
+      assert.equal(computePairwiseOverlap(holdings95A, holdings95B, true, false, false), null);
+
+      const matrixRes = computeOverlapMatrix([
+        { scheme_code: 9001, name: 'Fund 95 A', holdings: holdings95A, partialCoverage: false },
+        { scheme_code: 9002, name: 'Fund 95 B', holdings: holdings95B, partialCoverage: false },
+      ]);
+      assert.equal(matrixRes.available, true);
+      assert.equal(matrixRes.exactAvailable, false);
+      assert.equal(matrixRes.matrix[0][1], null);
+      assert.equal(matrixRes.matrix[1][0], null);
+      assert.equal(matrixRes.matrix[0][0], null);
+      assert.equal(matrixRes.observedSubsetMatrix[0][1], 0);
+      assert.deepEqual(matrixRes.unknownPctByFund, [5, 5]);
+      assert.deepEqual(matrixRes.coverageStatusByFund, ['partial', 'partial']);
+      assert.deepEqual(matrixRes.coverageDetailByFund, [
+        'partial_high_coverage',
+        'partial_high_coverage',
+      ]);
+
+      // Verify export propagation distinguishes 95% partial_high_coverage from exactness
+      const baseMeta = PRESET_FUNDS[122639];
+      const testFund95: FundMeta = {
+        ...baseMeta,
+        scheme_code: 9001,
+        name: 'Fund 95 A',
+        holdings: holdings95A,
+        holdingsStatus: {
+          available: true,
+          asOfDate: '2026-09-30',
+          source: 'Test',
+          partialCoverage: false,
+          disclosedWeightPct: 95,
+          unknownWeightPct: 5,
+          coverageThresholdPct: 100,
+          reason: null,
+        },
+      };
+      const bm = resolveBenchmarkSeries('^CRSLDX');
+      const exportInput: ExportBuilderInput = {
+        selectedFunds: [testFund95],
+        riskMetrics: [],
+        trailingMetaMap: { 9001: { values: {}, unavailableReasons: {} } },
+        seriesMap: { 9001: [] },
+        validationMap: {},
+        holdingsOverlap: matrixRes,
+        benchmarkStatus: bm,
+        rfRate: 6.5,
+      };
+
+      const compCsv = buildComparisonCsv(exportInput);
+      assert.match(compCsv, /"partial_high_coverage",95,95,0,95,5,"No"/);
+
+      const jsonPkg = buildComparisonJsonPayload(exportInput);
+      assert.equal(jsonPkg.funds[0].holdingsCoverage.coverageStatus, 'partial_high_coverage');
+      assert.equal(jsonPkg.funds[0].holdingsCoverage.highCoverage, true);
+      assert.equal(jsonPkg.funds[0].holdingsCoverage.unknownWeightPct, 5);
+      assert.equal(jsonPkg.funds[0].holdingsCoverage.exactFullPortfolioAnalyticsAllowed, false);
+      assert.equal(jsonPkg.metadata.holdingsOverlap?.exactAvailable, false);
+
+      const factsheetCsv = buildSingleFundFactsheetCsv(testFund95, exportInput);
+      assert.match(factsheetCsv, /"Holdings Coverage Status","High-Coverage Partial/);
+      assert.match(factsheetCsv, /"Holdings Exactness Allowed","No"/);
+    });
+
+    it('reconciles inconsistent totals (>100.5%) and distinguishes classified cash from undisclosed assets', () => {
+      // 95% equity + 5% expressly classified cash = 100% disclosed (0% unknown) -> exact!
+      const withCashA: FundHolding[] = [
+        { isin: 'INE101A01001', name: 'Equity A', sector: 'Technology', mcap: 'Large Cap', weight: 95, adtv_cr: 100 },
+        { isin: 'CASH_EQUIV', name: 'TREPS & Cash Collateral', sector: 'Cash / Sovereign', mcap: 'Cash / Sovereign', weight: 5, adtv_cr: null },
+      ];
+      const withCashB: FundHolding[] = [
+        { isin: 'INE202B01001', name: 'Equity B', sector: 'Healthcare', mcap: 'Mid Cap', weight: 96, adtv_cr: 100 },
+        { isin: 'CASH_EQUIV', name: 'TREPS & Cash Collateral', sector: 'Cash / Sovereign', mcap: 'Cash / Sovereign', weight: 4, adtv_cr: null },
+      ];
+
+      const covCashA = computeHoldingsCoverage(withCashA, false);
+      assert.equal(covCashA.nonCashWeightPct, 95);
+      assert.equal(covCashA.cashWeightPct, 5);
+      assert.equal(covCashA.unknownWeightPct, 0);
+      assert.equal(covCashA.isExact, true);
+      assert.equal(computePairwiseOverlap(withCashA, withCashB, true, false, false), 0);
+
+      // Inconsistent over-100% total (108%) must NOT silently clamp to 100% exact
+      const inconsistentOver: FundHolding[] = [
+        { isin: 'INE101A01001', name: 'Stock X', sector: 'Technology', mcap: 'Large Cap', weight: 60, adtv_cr: 100 },
+        { isin: 'INE101A01002', name: 'Stock Y', sector: 'Energy', mcap: 'Large Cap', weight: 48, adtv_cr: 100 },
+      ];
+      const covOver = computeHoldingsCoverage(inconsistentOver, false);
+      assert.equal(covOver.hasInconsistentTotal, true);
+      assert.equal(covOver.rawTotalWeightPct, 108);
+      assert.equal(covOver.excessWeightPct, 8);
+      assert.equal(covOver.isExact, false);
+      assert.equal(covOver.coverageStatus, 'inconsistent_total');
+
+      const pairOver = computePairwiseOverlapWithMeta(inconsistentOver, withCashB, true, false, false);
+      assert.equal(pairOver.exactOverlap, null);
+      assert.equal(pairOver.observedSubsetOverlap, null);
+      assert.equal(pairOver.coverageStatus, 'inconsistent_total');
+
+      const matOver = computeOverlapMatrix([
+        { scheme_code: 9101, name: 'Over 108', holdings: inconsistentOver, partialCoverage: false },
+        { scheme_code: 9102, name: 'With Cash B', holdings: withCashB, partialCoverage: false },
+      ]);
+      assert.equal(matOver.exactAvailable, false);
+      assert.equal(matOver.matrix[0][1], null);
+      assert.deepEqual(matOver.coverageDetailByFund, ['inconsistent_total', 'complete']);
+      assert.deepEqual(matOver.coverageStatusByFund, ['partial', 'complete']);
+    });
+
+    it('retains missing-holdings funds in denominator for market-cap and sector exposure (explicit and default equal weights)', () => {
+      const fullTechLargeCap: FundHolding[] = [
+        { isin: 'INE301A01001', name: 'Tech Giant Ltd', sector: 'Technology', mcap: 'Large Cap', weight: 100, adtv_cr: 500 },
+      ];
+      const missingFund = { holdings: null, partialCoverage: false };
+      const fullFund = { holdings: fullTechLargeCap, partialCoverage: false };
+
+      for (const weights of [[50, 50], undefined]) {
+        const cap = aggregateMarketCapExposure([fullFund, missingFund], weights);
+        assert.equal(cap.available, true);
+        assert.equal(cap.exactAvailable, false);
+        assert.equal(cap.isPartialSubset, true);
+        assert.equal(cap.coveredWeightPct, 50);
+        assert.equal(cap.unknownWeightPct, 50);
+        assert.equal(cap.segments.find((s) => s.segment === 'Large Cap')?.weight, 50);
+        assert.equal(cap.segments.find((s) => s.segment === 'Unknown / Undisclosed')?.weight, 50);
+
+        const sec = aggregateSectorExposure([fullFund, missingFund], weights);
+        assert.equal(sec.available, true);
+        assert.equal(sec.exactAvailable, false);
+        assert.equal(sec.isPartialSubset, true);
+        assert.equal(sec.coveredWeightPct, 50);
+        assert.equal(sec.unknownWeightPct, 50);
+        assert.equal(sec.sectors.find((s) => s.sector === 'Technology')?.weight, 50);
+        assert.equal(sec.sectors.find((s) => s.sector === 'Unknown / Undisclosed')?.weight, 50);
+      }
+
+      // Preserve unavailable when all selected funds lack holdings
+      const capAllMissing = aggregateMarketCapExposure([missingFund, { holdings: [], partialCoverage: false }]);
+      assert.equal(capAllMissing.available, false);
+      assert.equal(capAllMissing.exactAvailable, false);
+      assert.equal(capAllMissing.segments.length, 0);
+
+      const secAllMissing = aggregateSectorExposure([missingFund, { holdings: [], partialCoverage: false }]);
+      assert.equal(secAllMissing.available, false);
+      assert.equal(secAllMissing.exactAvailable, false);
+      assert.equal(secAllMissing.sectors.length, 0);
+    });
   });
 
   describe('Batch 1 Invariants: Benchmark Suppression & Corporate Action Quarantine', () => {

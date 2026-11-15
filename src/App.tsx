@@ -337,7 +337,11 @@ export default function App() {
       observedSubsetMatrix: matrixRes.observedSubsetMatrix,
       coveragePctByFund: matrixRes.coveragePctByFund,
       unknownPctByFund: matrixRes.unknownPctByFund,
+      cashPctByFund: matrixRes.cashPctByFund,
+      nonCashPctByFund: matrixRes.nonCashPctByFund,
+      rawTotalPctByFund: matrixRes.rawTotalPctByFund,
       coverageStatusByFund: matrixRes.coverageStatusByFund,
+      coverageDetailByFund: matrixRes.coverageDetailByFund,
       mcapExposure,
       sectorExposure,
       corrAvailable: corrRes.available,
@@ -1199,7 +1203,11 @@ export default function App() {
                   observedSubsetMatrix={overlapData.observedSubsetMatrix}
                   coveragePctByFund={overlapData.coveragePctByFund}
                   unknownPctByFund={overlapData.unknownPctByFund}
+                  cashPctByFund={overlapData.cashPctByFund}
+                  nonCashPctByFund={overlapData.nonCashPctByFund}
+                  rawTotalPctByFund={overlapData.rawTotalPctByFund}
                   coverageStatusByFund={overlapData.coverageStatusByFund}
+                  coverageDetailByFund={overlapData.coverageDetailByFund}
                 />
               </div>
 
@@ -1224,7 +1232,7 @@ export default function App() {
                     <div className="space-y-3">
                       {overlapData.mcapExposure.isPartialSubset && (
                         <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60 text-[11px] text-amber-200 font-mono">
-                          Covered Subset: {overlapData.mcapExposure.coveredWeightPct.toFixed(2)}% | Unknown / Undisclosed: {overlapData.mcapExposure.unknownWeightPct.toFixed(2)}%
+                          Covered Subset: {overlapData.mcapExposure.coveredWeightPct.toFixed(2)}% ({(overlapData.mcapExposure.nonCashWeightPct ?? overlapData.mcapExposure.coveredWeightPct).toFixed(2)}% securities + {(overlapData.mcapExposure.cashWeightPct ?? 0).toFixed(2)}% cash) | Unknown / Undisclosed: {overlapData.mcapExposure.unknownWeightPct.toFixed(2)}%
                         </div>
                       )}
                       {overlapData.mcapExposure.segments.map((item) => (
@@ -1275,10 +1283,19 @@ export default function App() {
                     <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
                       {overlapData.sectorExposure.isPartialSubset && (
                         <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60 text-[11px] text-amber-200 font-mono mb-2">
-                          Covered Subset: {overlapData.sectorExposure.coveredWeightPct.toFixed(2)}% | Unknown / Undisclosed: {overlapData.sectorExposure.unknownWeightPct.toFixed(2)}%
+                          Covered Subset: {overlapData.sectorExposure.coveredWeightPct.toFixed(2)}% ({(overlapData.sectorExposure.nonCashWeightPct ?? overlapData.sectorExposure.coveredWeightPct).toFixed(2)}% securities + {(overlapData.sectorExposure.cashWeightPct ?? 0).toFixed(2)}% cash) | Unknown / Undisclosed: {overlapData.sectorExposure.unknownWeightPct.toFixed(2)}%
                         </div>
                       )}
-                      {overlapData.sectorExposure.sectors.slice(0, 10).map((item) => (
+                      {(() => {
+                        const allSectors = overlapData.sectorExposure.sectors;
+                        const topKnown = allSectors
+                          .filter((s) => s.sector !== 'Unknown / Undisclosed')
+                          .slice(0, 10);
+                        const unknownItem = allSectors.find(
+                          (s) => s.sector === 'Unknown / Undisclosed'
+                        );
+                        return unknownItem ? [...topKnown, unknownItem] : topKnown;
+                      })().map((item) => (
                         <div key={item.sector} className="flex items-center justify-between text-xs">
                           <span className={`font-medium truncate max-w-[200px] ${item.sector === 'Unknown / Undisclosed' ? 'text-amber-300' : 'text-slate-300'}`}>
                             {item.sector}

@@ -1,6 +1,7 @@
 import React from 'react';
 import { X, User, Shield, Award, FileText, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { FundMeta } from '../types/quant';
+import { computeHoldingsCoverage } from '../utils/quantEngine';
 
 interface FundFactsheetModalProps {
   fund: FundMeta | null;
@@ -278,28 +279,25 @@ export const FundFactsheetModal: React.FC<FundFactsheetModalProps> = ({ fund, is
           )}
 
           {/* Top Holdings Table */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-semibold text-white">Portfolio Holdings</span>
-              <span className="text-slate-400 font-mono text-[11px]">
-                {fund.holdings && fund.holdings.length > 0
-                  ? `${fund.holdings.length} disclosed line items · Coverage: ${
-                      fund.holdingsStatus.disclosedWeightPct !== null && fund.holdingsStatus.disclosedWeightPct !== undefined
-                        ? `${fund.holdingsStatus.disclosedWeightPct.toFixed(2)}% disclosed / ${(fund.holdingsStatus.unknownWeightPct ?? 0).toFixed(2)}% unknown`
-                        : fund.holdingsStatus.partialCoverage
-                        ? 'partial subset'
-                        : 'full'
-                    }`
-                  : 'Unavailable'}
-              </span>
-            </div>
+          {(() => {
+            const hCov = computeHoldingsCoverage(fund.holdings, fund.holdingsStatus.partialCoverage);
+            return (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-white">Portfolio Holdings</span>
+                  <span className="text-slate-400 font-mono text-[11px]">
+                    {fund.holdings && fund.holdings.length > 0 && hCov.hasHoldings
+                      ? `${fund.holdings.length} disclosed line items · ${hCov.nonCashWeightPct.toFixed(2)}% securities + ${hCov.cashWeightPct.toFixed(2)}% cash / ${hCov.unknownWeightPct.toFixed(2)}% unknown (${hCov.isExact ? 'Exact' : hCov.coverageStatus})`
+                      : 'Unavailable'}
+                  </span>
+                </div>
 
-            {fund.holdings && fund.holdings.length > 0 && fund.holdingsStatus.partialCoverage && (
-              <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60 text-[11px] text-amber-200">
-                Partial holdings disclosure: {fund.holdingsStatus.disclosedWeightPct?.toFixed(2) ?? 'Partial'}% disclosed;{' '}
-                {fund.holdingsStatus.unknownWeightPct?.toFixed(2) ?? 'Remainder'}% unknown/undisclosed. Exact full-portfolio overlap is suppressed until ≥95% coverage is ingested.
-              </div>
-            )}
+                {hCov.hasHoldings && !hCov.isExact && (
+                  <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60 text-[11px] text-amber-200">
+                    {hCov.reason ||
+                      `Partial holdings disclosure: ${hCov.disclosedWeightPct.toFixed(2)}% disclosed (${hCov.nonCashWeightPct.toFixed(2)}% securities + ${hCov.cashWeightPct.toFixed(2)}% classified cash); ${hCov.unknownWeightPct.toFixed(2)}% unknown/undisclosed. Exact full-portfolio overlap is suppressed until ~100% (±0.5% tolerance) coverage is ingested.`}
+                  </div>
+                )}
 
             {fund.holdings && fund.holdings.length > 0 ? (
               <div className="overflow-x-auto rounded-xl border border-slate-800">
@@ -335,7 +333,9 @@ export const FundFactsheetModal: React.FC<FundFactsheetModalProps> = ({ fund, is
                 {fund.holdingsStatus.reason || 'Unavailable: Security-level holdings disclosure not ingested.'}
               </div>
             )}
-          </div>
+              </div>
+            );
+          })()}
         </div>
 
         {/* Footer */}
